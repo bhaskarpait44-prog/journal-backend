@@ -97,49 +97,21 @@ router.get('/xlsx', async (req, res) => {
 });
 
 // ── GET /api/export/pdf-data ───────────────────────────────────────────────────
-// Returns JSON that frontend turns into a printable HTML page (browser PDF)
 router.get('/pdf-data', async (req, res) => {
   try {
-    const filter  = buildFilter(req.user.id, req.query);
-    const trades  = await Trade.findAll({
+    const filter = buildFilter(req.user.id, req.query);
+    const trades = await Trade.findAll({
       where: filter,
       order: [['exitDate', 'DESC'], ['entryDate', 'DESC']],
-      limit: 5000
     });
-    const user    = await User.findByPk(req.user.id, {
-      attributes: ['name', 'email']
-    });
-    const summary = computeSummary(trades);
-    const period  = periodLabel(req.query);
-
+    const user = await User.findByPk(req.user.id);
     res.json({
-      trades: trades.map(t => ({
-        symbol:      t.symbol || t.underlying,
-        underlying:  t.underlying,
-        tradeType:   t.tradeType,
-        optionType:  t.optionType,
-        strikePrice: t.strikePrice,
-        expiryDate:  t.expiryDate,
-        entryDate:   t.entryDate,
-        exitDate:    t.exitDate,
-        entryPrice:  t.entryPrice,
-        exitPrice:   t.exitPrice,
-        quantity:    t.quantity,
-        lotSize:     t.lotSize,
-        strategy:    t.strategy,
-        status:      t.status,
-        pnl:         t.pnl,
-        charges:     t.charges,
-        netPnl:      t.netPnl,
-        exchange:    t.exchange,
-      })),
-      summary,
-      user,
-      period,
+      trades: trades.map(t => t.toJSON()),
+      summary: computeSummary(trades),
+      user: { name: user.name, email: user.email },
+      period: periodLabel(req.query),
     });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 export default router;

@@ -62,7 +62,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'OK', database: 'connect
 // ── PostgreSQL / Sequelize ────────────────────────────────────────────────────
 sequelize.authenticate().then(() => {
   console.log('✅  PostgreSQL connected via Sequelize');
-  return sequelize.sync({ force: true }); // Sync models to database
+  return sequelize.sync({ alter: true }); // Sync models to database
 }).then(() => {
   console.log('✅  Database models synced');
   app.listen(PORT, () => console.log(`🚀  Backend on http://localhost:${PORT}`));

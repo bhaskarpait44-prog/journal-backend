@@ -1,4 +1,5 @@
 import express from 'express';
+import axios from 'axios';
 
 const router = express.Router();
 
@@ -187,11 +188,11 @@ router.get('/fno-symbols', async (req, res) => {
 
   if (shouldTry) {
     try {
-      const { default: axios } = await import('axios');
+      console.log('[NSE] Fetching live F&O symbols...');
 
       // Step 1: establish session cookie via homepage
       const homeRes = await axios.get('https://www.nseindia.com', {
-        timeout: 8000,
+        timeout: 4000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -202,13 +203,13 @@ router.get('/fno-symbols', async (req, res) => {
 
       // Step 2: visit derivatives page
       await axios.get('https://www.nseindia.com/market-data/equity-derivatives-watch', {
-        timeout: 5000,
+        timeout: 3000,
         headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies, 'Referer': 'https://www.nseindia.com' },
       });
 
       // Step 3: fetch F&O master CSV
       const csvRes = await axios.get('https://www.nseindia.com/api/master-quote', {
-        timeout: 8000,
+        timeout: 4000,
         headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies, 'Referer': 'https://www.nseindia.com/market-data/equity-derivatives-watch', 'Accept': 'application/json' },
       });
 
@@ -244,11 +245,11 @@ router.get('/market-snapshot', async (req, res) => {
   }
 
   try {
-    const { default: axios } = await import('axios');
+    console.log('[NSE] Fetching market snapshot...');
 
     // Establish NSE session cookie first
     const homeRes = await axios.get('https://www.nseindia.com', {
-      timeout: 8000,
+      timeout: 4000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml',
@@ -267,10 +268,12 @@ router.get('/market-snapshot', async (req, res) => {
     // Fetch NIFTY 50 and India VIX in parallel
     const [niftyRes, vixRes] = await Promise.all([
       axios.get('https://www.nseindia.com/api/quote-equity?symbol=NIFTY%2050&series=["EQ"]', {
-        timeout: 6000, headers: NSE_HEADERS,
+        timeout: 4000, 
+ headers: NSE_HEADERS,
       }).catch(() => null),
       axios.get('https://www.nseindia.com/api/quote-equity?symbol=INDIA%20VIX&series=["EQ"]', {
-        timeout: 6000, headers: NSE_HEADERS,
+        timeout: 4000, 
+ headers: NSE_HEADERS,
       }).catch(() => null),
     ]);
 
@@ -297,7 +300,8 @@ router.get('/market-snapshot', async (req, res) => {
     // Fallback: try indices API if quote API didn't work
     if (!nifty || !vix) {
       const idxRes = await axios.get('https://www.nseindia.com/api/allIndices', {
-        timeout: 6000, headers: NSE_HEADERS,
+        timeout: 4000, 
+ headers: NSE_HEADERS,
       }).catch(() => null);
 
       if (idxRes?.data?.data) {

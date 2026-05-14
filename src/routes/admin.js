@@ -30,14 +30,9 @@ router.get('/dashboard', guard, async (req, res) => {
       recentUsers, planBreakdown,
     ] = await Promise.all([
       User.count(),
-      User.count({ where: { 'subscription.status': 'active' } }),
+      User.count({ where: sequelize.literal(`"subscription"->>'status' = 'active'`) }),
       User.count({
-        where: {
-          [Op.or]: [
-            { 'subscription.plan': 'none' },
-            { 'subscription.status': { [Op.ne]: 'active' } }
-          ]
-        }
+        where: sequelize.literal(`"subscription"->>'plan' = 'none' OR "subscription"->>'status' != 'active'`)
       }),
       User.count({ where: { createdAt: { [Op.gte]: month } } }),
       Trade.count(),
@@ -120,8 +115,8 @@ router.get('/users', guard, async (req, res) => {
       { name:  { [Op.iLike]: `%${search}%` } },
       { email: { [Op.iLike]: `%${search}%` } },
     ];
-    if (plan)   where['subscription.plan']   = plan;
-    if (status) where['subscription.status'] = status;
+    if (plan)   where.subscription = { plan: plan };
+    if (status) where.subscription = { ...where.subscription, status: status };
 
     const [users, total] = await Promise.all([
       User.findAll({
@@ -296,8 +291,8 @@ router.get('/analytics', guard, async (req, res) => {
 router.get('/payments', guard, async (req, res) => {
   try {
     const { status = '', page = 1, limit = 20 } = req.query;
-    const where = { 'subscription.status': { [Op.ne]: 'none' } };
-    if (status) where['subscription.status'] = status;
+    const where = { subscription: { status: { [Op.ne]: 'none' } } };
+    if (status) where.subscription.status = status;
 
     const [users, total] = await Promise.all([
       User.findAll({

@@ -161,7 +161,7 @@ router.post('/forgot-password', async (req, res) => {
     await user.save();
 
     const clientUrl  = process.env.CLIENT_URL || 'http://localhost:5173';
-    const resetUrl   = `${clientUrl}/#reset-password?token=${resetToken}&email=${encodeURIComponent(user.email)}`;
+    const resetUrl   = `${clientUrl}/reset-password?token=${resetToken}&email=${encodeURIComponent(user.email)}`;
 
     const html = `
       <!DOCTYPE html>

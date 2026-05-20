@@ -22,15 +22,16 @@ router.get('/', async (req, res) => {
 // ── PUT /api/profile ──────────────────────────────────────────────────────────
 router.put('/', async (req, res) => {
   try {
-    const { name, profile } = req.body;
+    const { name, profile, preferredTheme } = req.body;
     const user = await User.findByPk(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found.' });
     
     if (name?.trim()) user.name = name.trim();
     if (profile)      user.profile = { ...user.profile, ...profile };
+    if (preferredTheme) user.preferences = { ...(user.preferences || {}), theme: preferredTheme };
     
     await user.save();
-    res.json({ name: user.name, email: user.email, profile: user.profile });
+    res.json({ name: user.name, email: user.email, profile: user.profile, preferences: user.preferences });
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
@@ -54,6 +55,54 @@ router.put('/password', async (req, res) => {
     await user.save();
     res.json({ message: 'Password changed successfully.' });
   } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+// ── GET /api/profile/templates ────────────────────────────────────────────────
+router.get('/templates', async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    const prefs = user.preferences || {};
+    res.json(prefs.templates || []);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── POST /api/profile/templates ───────────────────────────────────────────────
+router.post('/templates', async (req, res) => {
+  try {
+    const { name, underlying, lotSize, optionType, exchange, strategy } = req.body;
+    if (!name) return res.status(400).json({ message: 'Template name is required.' });
+    
+    const user = await User.findByPk(req.user.id);
+    const prefs = user.preferences || {};
+    const templates = prefs.templates || [];
+    
+    const idx = templates.findIndex(t => t.name === name);
+    const newTemplate = { name, underlying, lotSize, optionType, exchange, strategy };
+    if (idx >= 0) templates[idx] = newTemplate;
+    else templates.push(newTemplate);
+    
+    user.preferences = { ...prefs, templates };
+    await user.save();
+    
+    res.json(user.preferences.templates);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── DELETE /api/profile/templates/:name ───────────────────────────────────────
+router.delete('/templates/:name', async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    const prefs = user.preferences || {};
+    const templates = prefs.templates || [];
+    
+    user.preferences = {
+      ...prefs,
+      templates: templates.filter(t => t.name !== req.params.name)
+    };
+    await user.save();
+    
+    res.json(user.preferences.templates);
+  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 // ── GET /api/profile/risk ─────────────────────────────────────────────────────

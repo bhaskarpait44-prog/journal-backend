@@ -146,6 +146,10 @@ Trade.init({
       mistakeTags: [],
       notes: ''
     }
+  },
+  exitReason: {
+    type: DataTypes.ENUM('TARGET_HIT', 'STOPLOSS_HIT', 'MANUAL_EXIT'),
+    allowNull: true
   }
 }, {
   sequelize,
@@ -165,6 +169,20 @@ Trade.init({
         trade.netPnl = gross - (trade.charges || 0);
         const invested = trade.entryPrice * trade.quantity * trade.lotSize;
         trade.pnlPercent = invested > 0 ? (gross / invested) * 100 : 0;
+      }
+      
+      if (trade.exitPrice && trade.status === 'CLOSED' && trade.changed('exitPrice')) {
+        const isBuy = trade.tradeType === 'BUY';
+        const exitHitTarget = isBuy
+          ? trade.target && trade.exitPrice >= trade.target
+          : trade.target && trade.exitPrice <= trade.target;
+        const exitHitSL = isBuy
+          ? trade.stopLoss && trade.exitPrice <= trade.stopLoss
+          : trade.stopLoss && trade.exitPrice >= trade.stopLoss;
+        
+        trade.exitReason = exitHitTarget ? 'TARGET_HIT'
+                         : exitHitSL    ? 'STOPLOSS_HIT'
+                         : 'MANUAL_EXIT';
       }
     }
   }

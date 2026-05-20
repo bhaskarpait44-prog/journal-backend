@@ -4,9 +4,11 @@ import Trade from '../models/Trade.js';
 import User from '../models/User.js';
 import sequelize from '../lib/sequelize.js';
 import { protect } from '../middleware/auth.js';
+import { planGate } from '../middleware/planGate.js';
 
 const router = express.Router();
 router.use(protect);
+router.use(planGate('analytics'));
 
 // ── GET /api/analytics/summary ────────────────────────────────────────────────
 router.get('/summary', async (req, res) => {
@@ -18,17 +20,37 @@ router.get('/summary', async (req, res) => {
       if (from) where.exitDate[Op.gte] = new Date(from);
       if (to)   where.exitDate[Op.lte] = new Date(to);
     }
-    const trades     = await Trade.findAll({
-      where,
-      order: [['exitDate', 'ASC'], ['entryDate', 'ASC']]
-    });
+
     const openTrades = await Trade.count({ where: { userId: req.user.id, status: 'OPEN' } });
+
+    const [aggResult] = await Trade.findAll({
+      where,
+      attributes: [
+        [sequelize.fn('COUNT', sequelize.col('id')), 'total'],
+        [sequelize.fn('SUM', sequelize.literal('CASE WHEN "netPnl" > 0 THEN 1 ELSE 0 END')), 'winners'],
+        [sequelize.fn('SUM', sequelize.col('netPnl')), 'totalPnl'],
+        [sequelize.fn('SUM', sequelize.col('charges')), 'totalCharges'],
+        [sequelize.fn('MAX', sequelize.col('netPnl')), 'maxWin'],
+        [sequelize.fn('MIN', sequelize.col('netPnl')), 'maxLoss'],
+        [sequelize.fn('AVG', sequelize.col('netPnl')), 'avgPnl'],
+      ],
+      raw: true
+    });
+
+    const trades = await Trade.findAll({
+      where,
+      attributes: ['netPnl', 'exchange', 'charges', 'pnl'],
+      order: [['exitDate', 'ASC'], ['entryDate', 'ASC']],
+      raw: true
+    });
+
     const winners    = trades.filter(t => t.netPnl > 0);
     const losers     = trades.filter(t => t.netPnl <= 0);
-    const totalPnl   = trades.reduce((s, t) => s + (t.netPnl || 0), 0);
+    const totalPnl   = parseFloat(aggResult.totalPnl || 0);
+    const totalCharges = parseFloat(aggResult.totalCharges || 0);
     const avgWin     = winners.length ? winners.reduce((s,t) => s + t.netPnl, 0) / winners.length : 0;
     const avgLoss    = losers.length  ? losers.reduce((s,t)  => s + t.netPnl, 0) / losers.length  : 0;
-    const totalCharges = trades.reduce((s,t) => s + (t.charges||0), 0);
+    
     const nseCharges   = trades.filter(t => (t.exchange||'NSE') === 'NSE').reduce((s,t) => s + (t.charges||0), 0);
     const bseCharges   = trades.filter(t => t.exchange === 'BSE').reduce((s,t) => s + (t.charges||0), 0);
     const nseTrades    = trades.filter(t => (t.exchange||'NSE') === 'NSE').length;
@@ -58,13 +80,16 @@ router.get('/summary', async (req, res) => {
     }
 
     res.json({
-      totalTrades: trades.length, openTrades, winners: winners.length, losers: losers.length,
+      totalTrades: parseInt(aggResult.total || 0), openTrades, 
+      winners: parseInt(aggResult.winners || 0), 
+      losers: parseInt(aggResult.total || 0) - parseInt(aggResult.winners || 0),
       totalPnl, totalCharges, nseCharges, bseCharges, nseTrades, bseTrades,
       grossPnl: trades.reduce((s,t) => s + (t.pnl||0), 0),
-      avgWin, avgLoss, winRate: trades.length ? (winners.length / trades.length) * 100 : 0,
+      avgWin, avgLoss, 
+      winRate: parseInt(aggResult.total || 0) ? (parseInt(aggResult.winners || 0) / parseInt(aggResult.total || 0)) * 100 : 0,
       profitFactor: Math.abs(avgLoss) > 0 ? Math.abs(avgWin / avgLoss) : 0,
-      maxWin:  winners.length ? Math.max(...winners.map(t => t.netPnl)) : 0,
-      maxLoss: losers.length  ? Math.min(...losers.map(t  => t.netPnl)) : 0,
+      maxWin:  parseFloat(aggResult.maxWin || 0),
+      maxLoss: parseFloat(aggResult.maxLoss || 0),
       streaks: {
         currentStreak, currentStreakType,
         currentStreakPnl: parseFloat(currentStreakPnl.toFixed(2)),
@@ -433,6 +458,52 @@ router.get('/deep', async (req, res) => {
       minHold: fmtMins(minHoldMins),
       maxHold: fmtMins(maxHoldMins),
       holdingTime, timeOfDay, dayOfWeek, chargesImpact, streaks,
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── GET /api/analytics/daily-risk-status ──────────────────────────────────────
+router.get('/daily-risk-status', async (req, res) => {
+  try {
+    const fromDate = new Date();
+    fromDate.setHours(0, 0, 0, 0);
+    const toDate = new Date();
+    toDate.setHours(23, 59, 59, 999);
+
+    const trades = await Trade.findAll({
+      where: {
+        userId: req.user.id,
+        status: 'CLOSED',
+        exitDate: { [Op.gte]: fromDate, [Op.lte]: toDate }
+      }
+    });
+
+    const todayPnl = trades.reduce((sum, t) => sum + (t.netPnl || 0), 0);
+
+    const user = await User.findByPk(req.user.id);
+    const risk = user.riskManagement || {};
+    const totalCapital = Number(risk.totalCapital) || 0;
+    const maxDailyLossPct = Number(risk.maxDailyLoss) || 2;
+    
+    const maxDailyLossAmount = (totalCapital * maxDailyLossPct) / 100;
+    
+    let percentUsed = 0;
+    let isBreached = false;
+    let isWarning = false;
+    
+    if (maxDailyLossAmount > 0 && todayPnl < 0) {
+      const lossAmount = Math.abs(todayPnl);
+      percentUsed = (lossAmount / maxDailyLossAmount) * 100;
+      isBreached = percentUsed >= 100;
+      isWarning = percentUsed >= 80;
+    }
+
+    res.json({
+      todayPnl,
+      maxDailyLossAmount,
+      percentUsed,
+      isBreached,
+      isWarning
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

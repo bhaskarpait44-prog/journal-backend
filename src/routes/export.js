@@ -2,11 +2,13 @@ import express        from 'express';
 import Trade          from '../models/Trade.js';
 import User           from '../models/User.js';
 import { protect }   from '../middleware/auth.js';
+import { planGate }  from '../middleware/planGate.js';
 import { buildXlsx } from '../lib/xlsxBuilder.js';
 import { Op } from 'sequelize';
 
 const router = express.Router();
 router.use(protect);
+router.use(planGate('export'));
 
 // ── Shared filter builder ──────────────────────────────────────────────────────
 function buildFilter(userId, query) {

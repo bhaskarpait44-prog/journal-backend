@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import Trade from '../models/Trade.js';
 import { protect } from '../middleware/auth.js';
+import { planGate } from '../middleware/planGate.js';
 import { parseCSVBuffer } from '../lib/csvParser.js';
 import { calcCharges } from '../lib/calcCharges.js';
 import { Op } from 'sequelize';
@@ -73,8 +74,16 @@ router.get('/', async (req, res) => {
   } catch(err){res.status(500).json({message:err.message});}
 });
 
-router.post('/', async (req, res) => {
+router.post('/', planGate('tradeLimit'), async (req, res) => {
   try {
+    const limit = req.planFlags?.tradeLimit || -1;
+    if (limit !== -1) {
+      const count = await Trade.count({ where: { userId: req.user.id } });
+      if (count >= limit) {
+        return res.status(403).json({ message: 'Upgrade your plan to log more trades.' });
+      }
+    }
+
     const body     = { ...req.body, userId: req.user.id, source: 'manual' };
     const exchange = body.exchange || 'NSE';
     // Always auto-calculate — ignore any charges sent from client
@@ -154,18 +163,48 @@ router.get('/:id/psychology', async (req, res) => {
   } catch(err){res.status(500).json({message:err.message});}
 });
 
-router.post('/import/csv', upload.single('file'), async (req, res) => {
+router.post('/import/csv', planGate('csvImport'), upload.single('file'), async (req, res) => {
   try {
     if(!req.file) return res.status(400).json({message:'No file uploaded.'});
     const {broker,trades:rawTrades,skipped} = parseCSVBuffer(req.file.buffer,req.user.id);
     if(!rawTrades.length) return res.status(400).json({message:`No options trades found. Broker: ${broker}.`,broker,skipped:skipped.slice(0,10)});
     const paired = buildPositions(rawTrades,req.user.id,'csv',broker);
-    const inserted = await Trade.bulkCreate(paired);
-    res.status(201).json({message:`${inserted.length} trades imported from ${broker}.`,count:inserted.length,broker,closed:paired.filter(t=>t.status==='CLOSED').length,open:paired.filter(t=>t.status==='OPEN').length,skipped:skipped.length,tradeIds:inserted.map(t=>({id:t.id,symbol:t.symbol,entryDate:t.entryDate}))});
+
+    // Limit check for CSV import
+    const limit = req.planFlags?.tradeLimit || -1;
+    if (limit !== -1) {
+      const count = await Trade.count({ where: { userId: req.user.id } });
+      if (count + paired.length > limit) {
+        return res.status(403).json({ message: `CSV import exceeds your plan's trade limit (${limit}). Upgrade for more.` });
+      }
+    }
+
+    const brokerIds = paired.filter(t => t.brokerId).map(t => t.brokerId);
+    const existing = brokerIds.length > 0
+      ? await Trade.findAll({
+          where: { userId: req.user.id, brokerId: { [Op.in]: brokerIds } },
+          attributes: ['brokerId']
+        })
+      : [];
+    const existingIds = new Set(existing.map(t => t.brokerId));
+    const deduplicated = paired.filter(t => !t.brokerId || !existingIds.has(t.brokerId));
+    const duplicatesSkipped = paired.length - deduplicated.length;
+
+    const inserted = await Trade.bulkCreate(deduplicated);
+    res.status(201).json({
+      message: `${inserted.length} trades imported. ${duplicatesSkipped > 0 ? `${duplicatesSkipped} duplicates skipped.` : ''}`,
+      count: inserted.length,
+      broker,
+      closed: deduplicated.filter(t => t.status === 'CLOSED').length,
+      open: deduplicated.filter(t => t.status === 'OPEN').length,
+      skipped: skipped.length,
+      duplicatesSkipped,
+      tradeIds: inserted.map(t => ({ id: t.id, symbol: t.symbol, entryDate: t.entryDate }))
+    });
   } catch(err){res.status(400).json({message:'CSV import failed: '+err.message});}
 });
 
-router.post('/import/broker', async (req, res) => {
+router.post('/import/broker', planGate('brokerSync'), async (req, res) => {
   const { broker, clientId, accessToken, fromDate, toDate } = req.body;
   if (!accessToken) return res.status(400).json({ message: 'Access token is required.' });
   if (!clientId)    return res.status(400).json({ message: 'Client ID is required.' });
@@ -223,6 +262,16 @@ router.post('/import/broker', async (req, res) => {
 
   try {
     const paired   = buildPositions(rawTrades, req.user.id, 'broker_api', 'dhan');
+
+    // Limit check for broker import
+    const limit = req.planFlags?.tradeLimit || -1;
+    if (limit !== -1) {
+      const count = await Trade.count({ where: { userId: req.user.id } });
+      if (count + paired.length > limit) {
+        return res.status(403).json({ message: `Broker sync exceeds your plan's trade limit (${limit}). Upgrade for more.` });
+      }
+    }
+
     const inserted = await Trade.bulkCreate(paired);
     res.json({ message:`${inserted.length} trades synced from Dhan.`, count:inserted.length, closed:paired.filter(t=>t.status==='CLOSED').length, open:paired.filter(t=>t.status==='OPEN').length, tradeIds:inserted.map(t=>({id:t.id,symbol:t.symbol,entryDate:t.entryDate})) });
   } catch(err) {
@@ -231,7 +280,7 @@ router.post('/import/broker', async (req, res) => {
 });
 
 // ── POST /api/trades/import/fyers ─────────────────────────────────────────────
-router.post('/import/fyers', async (req, res) => {
+router.post('/import/fyers', planGate('brokerSync'), async (req, res) => {
   const { appId, accessToken, fromDate, toDate } = req.body;
   if (!accessToken) return res.status(400).json({ message: 'Access token is required.' });
   if (!appId)       return res.status(400).json({ message: 'App ID is required.' });
@@ -354,6 +403,16 @@ router.post('/import/fyers', async (req, res) => {
 
   try {
     const paired   = buildPositions(rawTrades, req.user.id, 'broker_api', 'fyers');
+
+    // Limit check for Fyers import
+    const limit = req.planFlags?.tradeLimit || -1;
+    if (limit !== -1) {
+      const count = await Trade.count({ where: { userId: req.user.id } });
+      if (count + paired.length > limit) {
+        return res.status(403).json({ message: `Fyers sync exceeds your plan's trade limit (${limit}). Upgrade for more.` });
+      }
+    }
+
     const inserted = await Trade.bulkCreate(paired);
     res.json({
       message: `${inserted.length} trades synced from Fyers.`,

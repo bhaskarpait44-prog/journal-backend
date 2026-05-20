@@ -3,8 +3,11 @@ import { Op } from 'sequelize';
 import User     from '../models/User.js';
 import Trade    from '../models/Trade.js';
 import Settings from '../models/Settings.js';
+import Coupon   from '../models/Coupon.js';
+import AuditLog from '../models/AuditLog.js';
 import sequelize from '../lib/sequelize.js';
 import { protect } from '../middleware/auth.js';
+import { logAction } from '../lib/auditLogger.js';
 
 const router = express.Router();
 
@@ -186,6 +189,7 @@ router.put('/users/:id', guard, async (req, res) => {
     }
 
     await user.update(update);
+    await logAction(req, 'UPDATE_USER', 'user', user.id, { updatedFields: Object.keys(update) });
     res.json({ user: user.toJSON() });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -193,8 +197,12 @@ router.put('/users/:id', guard, async (req, res) => {
 // ── DELETE /api/admin/users/:id ───────────────────────────────────────────────
 router.delete('/users/:id', guard, async (req, res) => {
   try {
+    const user = await User.findByPk(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
     await Trade.destroy({ where: { userId: req.params.id } });
     await User.destroy({ where: { id: req.params.id } });
+    await logAction(req, 'DELETE_USER', 'user', req.params.id, { userEmail: user.email });
     res.json({ message: 'User and all their trades deleted.' });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -426,6 +434,7 @@ router.put('/settings', guard, async (req, res) => {
       key: 'platform',
       value: merged
     });
+    await logAction(req, 'UPDATE_SETTINGS', 'settings', 'platform', { updatedFields: Object.keys(update) });
     res.json({ success: true, settings: doc.value });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -441,12 +450,22 @@ router.get('/public-settings', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// ── GET /api/admin/announcement (no auth — used by dashboard) ────────────────
+router.get('/announcement', async (req, res) => {
+  try {
+    const doc = await Settings.findByPk('platform');
+    const s   = { ...DEFAULT_SETTINGS, ...(doc?.value || {}) };
+    res.json({ announcement: s.announcement || '' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 // ── POST /api/admin/users/:id/make-admin ──────────────────────────────────────
 router.post('/users/:id/make-admin', guard, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
     await user.update({ role: 'admin' });
+    await logAction(req, 'GRANT_ADMIN', 'user', user.id, { userEmail: user.email });
     res.json({ success: true, message: `${user.email} is now an admin`, user: user.toJSON() });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -457,6 +476,7 @@ router.post('/users/:id/revoke-admin', guard, async (req, res) => {
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
     await user.update({ role: 'user' });
+    await logAction(req, 'REVOKE_ADMIN', 'user', user.id, { userEmail: user.email });
     res.json({ success: true, message: `Admin access revoked for ${user.email}`, user: user.toJSON() });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -477,7 +497,88 @@ router.post('/users/:id/extend-subscription', guard, async (req, res) => {
     if (plan) sub.plan = plan;
 
     await user.update({ subscription: sub });
+    await logAction(req, 'EXTEND_SUBSCRIPTION', 'subscription', user.id, { days, plan, newExpiry });
     res.json({ success: true, message: `Subscription extended by ${days} days`, newExpiry });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── POST /api/admin/users/:id/gift-plan ──────────────────────────────────────
+router.post('/users/:id/gift-plan', guard, async (req, res) => {
+  try {
+    const { plan = 'starter', days = 30 } = req.body;
+    const user = await User.findByPk(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    const sub = { 
+      plan, 
+      status: 'active', 
+      expiry, 
+      startedAt: new Date(),
+      gifted: true 
+    };
+
+    await user.update({ subscription: sub });
+    res.json({ success: true, message: `Gifted ${plan} plan for ${days} days`, user: user.toJSON() });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── POST /api/admin/bulk-action ───────────────────────────────────────────────
+router.post('/bulk-action', guard, async (req, res) => {
+  try {
+    const { userIds, action, days, plan } = req.body;
+    if (!userIds || !Array.isArray(userIds) || !action) {
+      return res.status(400).json({ message: 'Invalid payload' });
+    }
+
+    const users = await User.findAll({ where: { id: { [Op.in]: userIds } } });
+    const updates = users.map(async (user) => {
+      const sub = { ...user.subscription };
+      
+      if (action === 'cancel') {
+        sub.status = 'cancelled';
+      } else if (action === 'extend') {
+        const currentExpiry = sub.expiry && new Date(sub.expiry) > new Date()
+          ? new Date(sub.expiry)
+          : new Date();
+        sub.expiry = new Date(currentExpiry.getTime() + (days || 30) * 24 * 60 * 60 * 1000);
+        sub.status = 'active';
+      } else if (action === 'changePlan') {
+        sub.plan = plan || 'starter';
+        sub.status = 'active';
+        if (!sub.expiry || new Date(sub.expiry) < new Date()) {
+          sub.expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        }
+      }
+
+      return user.update({ subscription: sub });
+    });
+
+    await Promise.all(updates);
+    res.json({ success: true, message: `Bulk action "${action}" applied to ${users.length} users` });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── GET /api/admin/subscriptions/expiring ────────────────────────────────────
+router.get('/subscriptions/expiring', guard, async (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 7;
+    const now = new Date();
+    const future = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const users = await User.findAll({
+      where: {
+        [Op.and]: [
+          sequelize.literal(`"subscription"->>'status' = 'active'`),
+          sequelize.literal(`("subscription"->>'expiry')::timestamp >= '${now.toISOString()}'`),
+          sequelize.literal(`("subscription"->>'expiry')::timestamp <= '${future.toISOString()}'`)
+        ]
+      },
+      attributes: ['id', 'name', 'email', 'subscription'],
+      order: [sequelize.literal(`"subscription"->>'expiry' ASC`)]
+    });
+
+    res.json({ users, count: users.length });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -490,7 +591,111 @@ router.post('/broadcast', guard, async (req, res) => {
     const current = await Settings.findByPk('platform');
     const value = { ...(current?.value || DEFAULT_SETTINGS), announcement: message };
     await Settings.upsert({ key: 'platform', value });
+    await logAction(req, 'BROADCAST', 'settings', 'platform', { message });
     res.json({ success: true, message: 'Announcement updated for all users' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── GET /api/admin/coupons ────────────────────────────────────────────────────
+router.get('/coupons', guard, async (req, res) => {
+  try {
+    const coupons = await Coupon.findAll({ order: [['createdAt', 'DESC']] });
+    res.json({ coupons });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── POST /api/admin/coupons ───────────────────────────────────────────────────
+router.post('/coupons', guard, async (req, res) => {
+  try {
+    const { code, discountPct, maxUses, validPlans, expiresAt } = req.body;
+    const coupon = await Coupon.create({ code, discountPct, maxUses, validPlans, expiresAt });
+    res.json({ success: true, coupon });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── PUT /api/admin/coupons/:id ────────────────────────────────────────────────
+router.put('/coupons/:id', guard, async (req, res) => {
+  try {
+    const { active, discountPct, maxUses, validPlans, expiresAt } = req.body;
+    const coupon = await Coupon.findByPk(req.params.id);
+    if (!coupon) return res.status(404).json({ message: 'Coupon not found' });
+    
+    await coupon.update({ active, discountPct, maxUses, validPlans, expiresAt });
+    res.json({ success: true, coupon });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── DELETE /api/admin/coupons/:id ─────────────────────────────────────────────
+router.delete('/coupons/:id', guard, async (req, res) => {
+  try {
+    const coupon = await Coupon.findByPk(req.params.id);
+    if (!coupon) return res.status(404).json({ message: 'Coupon not found' });
+    await coupon.destroy();
+    res.json({ success: true, message: 'Coupon deleted' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+const DEFAULT_FEATURE_FLAGS = {
+  starter: { tradeLimit: -1, csvImport: true,  analytics: true,  brokerSync: false, aiInsights: false, export: true,  psychology: true },
+  pro:     { tradeLimit: -1, csvImport: true,  analytics: true,  brokerSync: true,  aiInsights: true,  export: true,  psychology: true }
+};
+
+// ── GET /api/admin/feature-flags ──────────────────────────────────────────────
+router.get('/feature-flags', guard, async (req, res) => {
+  try {
+    const doc = await Settings.findByPk('feature_flags');
+    res.json({ flags: doc?.value || DEFAULT_FEATURE_FLAGS });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── PUT /api/admin/feature-flags ──────────────────────────────────────────────
+router.put('/feature-flags', guard, async (req, res) => {
+  try {
+    const { starter, pro } = req.body;
+    if (!starter || !pro) return res.status(400).json({ message: 'Missing plan flags' });
+    
+    const [doc] = await Settings.upsert({
+      key: 'feature_flags',
+      value: { starter, pro }
+    });
+    await logAction(req, 'UPDATE_FEATURE_FLAGS', 'settings', 'feature_flags', { starter, pro });
+    res.json({ success: true, flags: doc.value });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ── GET /api/admin/audit-log ──────────────────────────────────────────────────
+router.get('/audit-log', guard, async (req, res) => {
+  try {
+    const { page = 1, limit = 50, action = '', adminId = '', targetType = '' } = req.query;
+    const where = {};
+    if (action)     where.action = action;
+    if (adminId)    where.adminId = adminId;
+    if (targetType) where.targetType = targetType;
+
+    const [logs, total] = await Promise.all([
+      AuditLog.findAll({
+        where,
+        order: [['createdAt', 'DESC']],
+        offset: (parseInt(page) - 1) * parseInt(limit),
+        limit: parseInt(limit)
+      }),
+      AuditLog.count({ where }),
+    ]);
+
+    // Join with admin names for the UI (using a simple map or Sequelize include if preferred)
+    const adminIds = [...new Set(logs.map(l => l.adminId))];
+    const admins = await User.findAll({
+      where: { id: { [Op.in]: adminIds } },
+      attributes: ['id', 'name', 'email']
+    });
+    const adminMap = admins.reduce((acc, a) => ({ ...acc, [a.id]: a }), {});
+
+    const enrichedLogs = logs.map(l => ({
+      ...l.toJSON(),
+      admin: adminMap[l.adminId] || { name: 'Unknown', email: l.adminEmail }
+    }));
+
+    res.json({ logs: enrichedLogs, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

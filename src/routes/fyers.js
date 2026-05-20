@@ -1,8 +1,10 @@
 import express       from 'express';
 import crypto        from 'crypto';
 import { protect as authMiddleware } from '../middleware/auth.js';
+import { planGate } from '../middleware/planGate.js';
 
 const router = express.Router();
+router.use(planGate('brokerSync'));
 
 // ── In-memory session store (per-process, fine for single server) ────────────
 // Maps sessionId → { appId, secretId, userId, accessToken, status, error }

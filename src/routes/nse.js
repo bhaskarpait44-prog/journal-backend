@@ -221,6 +221,7 @@ router.get('/fno-symbols', async (req, res) => {
         })).filter(s => s.symbol);
 
         cache = { symbols, ts: Date.now() };
+        res.setHeader('Cache-Control', 'public, max-age=21600'); // 6 hours
         return res.json({ symbols, source: 'nse_live', count: symbols.length });
       }
     } catch (err) {

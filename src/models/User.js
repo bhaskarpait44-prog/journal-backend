@@ -51,7 +51,7 @@ User.init({
     defaultValue: 'local'
   },
   role: {
-    type: DataTypes.ENUM('user', 'admin'),
+    type: DataTypes.STRING,
     defaultValue: 'user'
   },
   profile: {

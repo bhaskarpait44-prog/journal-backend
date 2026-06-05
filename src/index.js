@@ -18,7 +18,6 @@ import analyticsRoutes    from './routes/analytics.js';
 import profileRoutes      from './routes/profile.js';
 import subscriptionRoutes  from './routes/subscription.js';
 import nseRoutes          from './routes/nse.js';
-import adminRoutes        from './routes/admin.js';
 import exportRoutes       from './routes/export.js';
 import fyersRoutes        from './routes/fyers.js';
 
@@ -47,7 +46,6 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/profile',       profileRoutes);
 app.use('/api/subscription',  subscriptionRoutes);
 app.use('/api/nse',           nseRoutes);
-app.use('/api/admin',         adminRoutes);
 app.use('/api/export',        exportRoutes);
 app.use('/api/fyers',         fyersRoutes);
 

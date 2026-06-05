@@ -340,6 +340,76 @@ router.get('/market-snapshot', async (req, res) => {
   }
 });
 
+// ── GET /api/nse/expiry-dates/:symbol ─────────────────────────────────────────
+const expiryCache = new Map();
+const EXPIRY_TTL = 30 * 60 * 1000; // 30-minute cache
+
+router.get('/expiry-dates/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  
+  // Check cache
+  const cached = expiryCache.get(symbol);
+  if (cached && Date.now() - cached.ts < EXPIRY_TTL) {
+    return res.json({ expiryDates: cached.dates, source: 'cache' });
+  }
+
+  try {
+    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(symbol);
+    const baseUrl = isIndex 
+      ? 'https://www.nseindia.com/api/option-chain-indices' 
+      : 'https://www.nseindia.com/api/option-chain-equities';
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+    };
+
+    // 1. Establish session via main page
+    const homeRes = await axios.get('https://www.nseindia.com', { headers, timeout: 5000 });
+    const cookies = homeRes.headers['set-cookie']?.map(c => c.split(';')[0]).join('; ') || '';
+
+    // 2. Visit the option chain landing page to mature the session
+    await axios.get('https://www.nseindia.com/market-data/option-chain', {
+      timeout: 5000,
+      headers: {
+        ...headers,
+        'Cookie': cookies,
+        'Referer': 'https://www.nseindia.com',
+      },
+    });
+
+    // 3. Fetch option chain
+    const ocRes = await axios.get(`${baseUrl}?symbol=${encodeURIComponent(symbol)}`, {
+      timeout: 5000,
+      headers: {
+        ...headers,
+        'Cookie': cookies,
+        'Referer': 'https://www.nseindia.com/market-data/option-chain',
+      },
+    });
+
+    const expiryDates = ocRes.data?.records?.expiryDates || [];
+    
+    if (expiryDates.length > 0) {
+      expiryCache.set(symbol, { dates: expiryDates, ts: Date.now() });
+      return res.json({ expiryDates, source: 'live' });
+    }
+    
+    throw new Error(`No expiry dates found in NSE response for ${symbol}`);
+  } catch (err) {
+    console.error(`[NSE] Expiry fetch failed for ${symbol}:`, err.message);
+    // If it's a 401/403/404 from NSE, it might be an invalid symbol for options
+    const status = err.response?.status || 500;
+    res.status(status === 404 ? 404 : 503).json({ 
+      message: `Failed to fetch expiry dates for ${symbol}`, 
+      error: err.message 
+    });
+  }
+});
+
 function isMarketOpen() {
   const now = new Date();
   // IST = UTC + 5:30

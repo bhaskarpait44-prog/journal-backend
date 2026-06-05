@@ -86,6 +86,21 @@ router.post('/', planGate('tradeLimit'), async (req, res) => {
 
     const body     = { ...req.body, userId: req.user.id, source: 'manual' };
     const exchange = body.exchange || 'NSE';
+
+    // Date Validations
+    const today = new Date().toISOString().split('T')[0];
+    if (body.entryDate > today) {
+      return res.status(400).json({ message: 'Entry date cannot be in the future' });
+    }
+    if (body.exitDate) {
+      if (body.exitDate < body.entryDate) {
+        return res.status(400).json({ message: 'Exit date cannot be before entry date' });
+      }
+      if (body.exitDate > today) {
+        return res.status(400).json({ message: 'Exit date cannot be in the future' });
+      }
+    }
+
     // Always auto-calculate — ignore any charges sent from client
     if (body.exitPrice && body.status === 'CLOSED') {
       body.charges = calcCharges(body.entryPrice, body.exitPrice, body.lotSize, body.quantity, body.tradeType, exchange).total;
@@ -110,6 +125,24 @@ router.put('/:id', async (req, res) => {
     const qty      = body.quantity    || trade.quantity;
     const type     = body.tradeType   || trade.tradeType;
     const status   = body.status      || trade.status;
+    const psych    = body.psychology  || trade.psychology;
+
+    const entryDate = body.entryDate || trade.entryDate;
+    const exitDate  = body.exitDate  || trade.exitDate;
+
+    // Date Validations
+    const today = new Date().toISOString().split('T')[0];
+    if (entryDate > today) {
+      return res.status(400).json({ message: 'Entry date cannot be in the future' });
+    }
+    if (exitDate) {
+      if (exitDate < entryDate) {
+        return res.status(400).json({ message: 'Exit date cannot be before entry date' });
+      }
+      if (exitDate > today) {
+        return res.status(400).json({ message: 'Exit date cannot be in the future' });
+      }
+    }
     
     // Recalculate charges whenever trade is updated
     if (exit && status === 'CLOSED') {
@@ -117,6 +150,8 @@ router.put('/:id', async (req, res) => {
     } else {
       body.charges = calcCharges(entry, 0, lotSize, qty, type, exchange).total;
     }
+
+    body.psychology = psych;
     
     await trade.update(body);
     res.json({ trade });

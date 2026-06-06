@@ -30,8 +30,9 @@ const EXCHANGE_RATES = {
  * @param {number} lots        - Number of lots
  * @param {string} tradeType   - 'BUY' (long) or 'SELL' (short/write)
  * @param {string} exchange    - 'NSE' (default) or 'BSE'
+ * @param {string} status      - 'OPEN', 'CLOSED', or 'EXPIRED'
  */
-export function calcCharges(entryPrice, exitPrice, lotSize, lots, tradeType, exchange = 'NSE') {
+export function calcCharges(entryPrice, exitPrice, lotSize, lots, tradeType, exchange = 'NSE', status = 'OPEN') {
   if (!entryPrice || !lotSize || !lots) return zeroCharges();
 
   const qty            = lotSize * lots;
@@ -44,8 +45,9 @@ export function calcCharges(entryPrice, exitPrice, lotSize, lots, tradeType, exc
   const sellTurnover = tradeType === 'SELL' ? entryTurnover : exitTurnover;
   const buyTurnover  = tradeType === 'BUY'  ? entryTurnover : exitTurnover;
 
-  // 1 order for open (entry only), 2 for closed (round trip)
-  const orders = exitTurnover > 0 ? 2 : 1;
+  // 1 order for open (entry only), 2 for closed or expired (round trip / settlement)
+  const isSettled = status === 'CLOSED' || status === 'EXPIRED';
+  const orders = isSettled ? 2 : 1;
 
   const brokerage   = 20 * orders;                                     // FLAT ₹20 per order
   const stt         = 0.001 * sellTurnover;                            // 0.1% sell side

@@ -89,23 +89,27 @@ router.post('/', planGate('tradeLimit'), async (req, res) => {
 
     // Date Validations
     const today = new Date().toISOString().split('T')[0];
-    if (body.entryDate > today) {
+    const entryDateStr = new Date(body.entryDate).toISOString().split('T')[0];
+    
+    if (entryDateStr > today) {
       return res.status(400).json({ message: 'Entry date cannot be in the future' });
     }
     if (body.exitDate) {
-      if (body.exitDate < body.entryDate) {
+      const exitDateStr = new Date(body.exitDate).toISOString().split('T')[0];
+      if (exitDateStr < entryDateStr) {
         return res.status(400).json({ message: 'Exit date cannot be before entry date' });
       }
-      if (body.exitDate > today) {
+      if (exitDateStr > today) {
         return res.status(400).json({ message: 'Exit date cannot be in the future' });
       }
     }
 
     // Always auto-calculate — ignore any charges sent from client
-    if (body.exitPrice && body.status === 'CLOSED') {
-      body.charges = calcCharges(body.entryPrice, body.exitPrice, body.lotSize, body.quantity, body.tradeType, exchange).total;
+    const isSettled = body.status === 'CLOSED' || body.status === 'EXPIRED';
+    if (isSettled) {
+      body.charges = calcCharges(body.entryPrice, body.exitPrice || 0, body.lotSize, body.quantity, body.tradeType, exchange, body.status).total;
     } else {
-      body.charges = calcCharges(body.entryPrice, 0, body.lotSize, body.quantity, body.tradeType, exchange).total;
+      body.charges = calcCharges(body.entryPrice, 0, body.lotSize, body.quantity, body.tradeType, exchange, body.status).total;
     }
     const trade = await Trade.create(body);
     res.status(201).json({ trade });
@@ -132,24 +136,28 @@ router.put('/:id', async (req, res) => {
 
     // Date Validations
     const today = new Date().toISOString().split('T')[0];
-    if (entryDate > today) {
+    const entryDateStr = new Date(entryDate).toISOString().split('T')[0];
+
+    if (entryDateStr > today) {
       return res.status(400).json({ message: 'Entry date cannot be in the future' });
     }
     if (exitDate) {
-      if (exitDate < entryDate) {
+      const exitDateStr = new Date(exitDate).toISOString().split('T')[0];
+      if (exitDateStr < entryDateStr) {
         return res.status(400).json({ message: 'Exit date cannot be before entry date' });
       }
-      if (exitDate > today) {
+      if (exitDateStr > today) {
         return res.status(400).json({ message: 'Exit date cannot be in the future' });
       }
     }
-    
+
     // Recalculate charges whenever trade is updated
-    if (exit && status === 'CLOSED') {
-      body.charges = calcCharges(entry, exit, lotSize, qty, type, exchange).total;
+    if (status === 'CLOSED' || status === 'EXPIRED') {
+      body.charges = calcCharges(entry, exit || 0, lotSize, qty, type, exchange, status).total;
     } else {
-      body.charges = calcCharges(entry, 0, lotSize, qty, type, exchange).total;
+      body.charges = calcCharges(entry, 0, lotSize, qty, type, exchange, status).total;
     }
+
 
     body.psychology = psych;
     

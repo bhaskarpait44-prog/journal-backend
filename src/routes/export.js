@@ -45,7 +45,7 @@ function periodLabel(query) {
 }
 
 function computeSummary(trades) {
-  const closed   = trades.filter(t => t.status === 'CLOSED');
+  const closed   = trades.filter(t => t.status === 'CLOSED' || t.status === 'EXPIRED');
   const winners  = closed.filter(t => (t.netPnl||0) > 0);
   const losers   = closed.filter(t => (t.netPnl||0) <= 0);
   const totalPnl = closed.reduce((s,t) => s + (t.netPnl||0), 0);

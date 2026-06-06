@@ -162,27 +162,32 @@ Trade.init({
   ],
   hooks: {
     beforeSave: (trade) => {
-      if (trade.exitPrice && trade.status === 'CLOSED') {
+      const isSettled = trade.status === 'CLOSED' || trade.status === 'EXPIRED';
+      
+      if (isSettled) {
+        const exit = trade.status === 'EXPIRED' ? 0 : (trade.exitPrice || 0);
         const mult = trade.tradeType === 'BUY' ? 1 : -1;
-        const gross = mult * (trade.exitPrice - trade.entryPrice) * trade.quantity * trade.lotSize;
+        const gross = mult * (exit - trade.entryPrice) * trade.quantity * trade.lotSize;
+        
         trade.pnl = gross;
         trade.netPnl = gross - (trade.charges || 0);
         const invested = trade.entryPrice * trade.quantity * trade.lotSize;
         trade.pnlPercent = invested > 0 ? (gross / invested) * 100 : 0;
-      }
-      
-      if (trade.exitPrice && trade.status === 'CLOSED' && trade.changed('exitPrice')) {
-        const isBuy = trade.tradeType === 'BUY';
-        const exitHitTarget = isBuy
-          ? trade.target && trade.exitPrice >= trade.target
-          : trade.target && trade.exitPrice <= trade.target;
-        const exitHitSL = isBuy
-          ? trade.stopLoss && trade.exitPrice <= trade.stopLoss
-          : trade.stopLoss && trade.exitPrice >= trade.stopLoss;
-        
-        trade.exitReason = exitHitTarget ? 'TARGET_HIT'
-                         : exitHitSL    ? 'STOPLOSS_HIT'
-                         : 'MANUAL_EXIT';
+
+        // Auto-assign exitReason if not already set or if exit price changed
+        if (trade.changed('exitPrice') || trade.changed('status')) {
+          const isBuy = trade.tradeType === 'BUY';
+          const exitHitTarget = isBuy
+            ? trade.target && exit >= trade.target
+            : trade.target && exit <= trade.target;
+          const exitHitSL = isBuy
+            ? trade.stopLoss && exit <= trade.stopLoss
+            : trade.stopLoss && exit >= trade.stopLoss;
+          
+          trade.exitReason = exitHitTarget ? 'TARGET_HIT'
+                           : exitHitSL    ? 'STOPLOSS_HIT'
+                           : 'MANUAL_EXIT';
+        }
       }
     }
   }

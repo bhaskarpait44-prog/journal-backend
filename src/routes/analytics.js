@@ -13,15 +13,20 @@ router.use(planGate('analytics'));
 // ── GET /api/analytics/summary ────────────────────────────────────────────────
 router.get('/summary', async (req, res) => {
   try {
-    const { from, to } = req.query;
-    const where = { userId: req.user.id, status: 'CLOSED' };
+    const { from, to, strategy } = req.query;
+    const where = { userId: req.user.id, status: { [Op.in]: ['CLOSED', 'EXPIRED'] } };
     if (from || to) {
       where.exitDate = {};
       if (from) where.exitDate[Op.gte] = new Date(from);
       if (to)   where.exitDate[Op.lte] = new Date(to);
     }
+    if (strategy) {
+      where.strategy = strategy;
+    }
 
-    const openTrades = await Trade.count({ where: { userId: req.user.id, status: 'OPEN' } });
+    const openTradesWhere = { userId: req.user.id, status: 'OPEN' };
+    if (strategy) openTradesWhere.strategy = strategy;
+    const openTrades = await Trade.count({ where: openTradesWhere });
 
     const [aggResult] = await Trade.findAll({
       where,
@@ -56,23 +61,51 @@ router.get('/summary', async (req, res) => {
     const nseTrades    = trades.filter(t => (t.exchange||'NSE') === 'NSE').length;
     const bseTrades    = trades.filter(t => t.exchange === 'BSE').length;
 
-    // ── Streaks ───────────────────────────────────────────────────────────────
+    // ── Streaks & Drawdown ───────────────────────────────────────────────────
     let curWin = 0, curLoss = 0, maxWinStreak = 0, maxLossStreak = 0;
     let curWinPnl = 0, bestStreakPnl = 0, curLossPnl = 0, worstStreakPnl = 0;
+    
+    let peak = 0, runningPnl = 0, maxDD = 0;
+
     trades.forEach(t => {
       const pnl = t.netPnl || 0;
+      runningPnl += pnl;
+      if (runningPnl > peak) peak = runningPnl;
+      const dd = peak - runningPnl;
+      if (dd > maxDD) maxDD = dd;
+
       if (pnl > 0) {
         curWin++; curLoss = 0; curLossPnl = 0; curWinPnl += pnl;
         if (curWin > maxWinStreak) { maxWinStreak = curWin; bestStreakPnl = curWinPnl; }
-      } else {
+      } else if (pnl < 0) {
         curLoss++; curWin = 0; curWinPnl = 0; curLossPnl += pnl;
         if (curLoss > maxLossStreak) { maxLossStreak = curLoss; worstStreakPnl = curLossPnl; }
       }
+      // Neutral pnl (0) doesn't reset or increment streaks
     });
-    // Current streak — walk backwards from most recent trade
+
+    // Expectancy = (Win% * AvgWin) + (Loss% * AvgLoss)
+    const totalCount = parseInt(aggResult.total || 0);
+    const winRate = totalCount ? (parseInt(aggResult.winners || 0) / totalCount) : 0;
+    const lossRate = 1 - winRate;
+    const expectancy = (winRate * avgWin) + (lossRate * avgLoss);
+
+    // Kelly Criterion: K% = W - [(1 - W) / R] 
+    // R = Avg Win / Avg Loss
+    const rRatio = Math.abs(avgLoss) > 0 ? Math.abs(avgWin / avgLoss) : 0;
+    let kellyPct = 0;
+    if (rRatio > 0 && winRate > 0) {
+      kellyPct = winRate - (lossRate / rRatio);
+    }
+
+    // Recovery Factor = Total Pnl / Max Drawdown
+    const recoveryFactor = maxDD > 0 ? (totalPnl / maxDD) : 0;
+
+    // Current streak — walk backwards from most recent trade, ignoring break-even
     let currentStreak = 0, currentStreakType = 'none', currentStreakPnl = 0;
     for (let i = trades.length - 1; i >= 0; i--) {
       const pnl  = trades[i].netPnl || 0;
+      if (pnl === 0) continue; 
       const type = pnl > 0 ? 'win' : 'loss';
       if (currentStreak === 0) { currentStreakType = type; currentStreak = 1; currentStreakPnl = pnl; }
       else if (type === currentStreakType) { currentStreak++; currentStreakPnl += pnl; }
@@ -80,14 +113,18 @@ router.get('/summary', async (req, res) => {
     }
 
     res.json({
-      totalTrades: parseInt(aggResult.total || 0), openTrades, 
+      totalTrades: totalCount, openTrades, 
       winners: parseInt(aggResult.winners || 0), 
-      losers: parseInt(aggResult.total || 0) - parseInt(aggResult.winners || 0),
+      losers: totalCount - parseInt(aggResult.winners || 0),
       totalPnl, totalCharges, nseCharges, bseCharges, nseTrades, bseTrades,
       grossPnl: trades.reduce((s,t) => s + (t.pnl||0), 0),
       avgWin, avgLoss, 
-      winRate: parseInt(aggResult.total || 0) ? (parseInt(aggResult.winners || 0) / parseInt(aggResult.total || 0)) * 100 : 0,
+      winRate: winRate * 100,
       profitFactor: Math.abs(avgLoss) > 0 ? Math.abs(avgWin / avgLoss) : 0,
+      expectancy,
+      kellyPct: parseFloat((kellyPct * 100).toFixed(2)),
+      maxDrawdown: maxDD,
+      recoveryFactor,
       maxWin:  parseFloat(aggResult.maxWin || 0),
       maxLoss: parseFloat(aggResult.maxLoss || 0),
       streaks: {
@@ -103,17 +140,21 @@ router.get('/summary', async (req, res) => {
 // ── GET /api/analytics/pnl-chart ─────────────────────────────────────────────
 router.get('/pnl-chart', async (req, res) => {
   try {
-    const { days = 30, from: fromQ, to: toQ } = req.query;
+    const { days = 30, from: fromQ, to: toQ, strategy } = req.query;
     // Accept explicit from/to OR fall back to days-ago
     const fromDate = fromQ ? new Date(fromQ) : (() => { const d = new Date(); d.setDate(d.getDate() - Number(days)); return d; })();
     const toDate   = toQ   ? new Date(toQ)   : new Date();
     toDate.setHours(23, 59, 59, 999); // include full last day
+
+    const where = {
+      userId: req.user.id,
+      status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
+      exitDate: { [Op.gte]: fromDate, [Op.lte]: toDate }
+    };
+    if (strategy) where.strategy = strategy;
+
     const trades = await Trade.findAll({
-      where: {
-        userId: req.user.id,
-        status: 'CLOSED',
-        exitDate: { [Op.gte]: fromDate, [Op.lte]: toDate }
-      },
+      where,
       order: [['exitDate', 'ASC']]
     });
     const dailyMap = {};
@@ -124,7 +165,13 @@ router.get('/pnl-chart', async (req, res) => {
       dailyMap[date].trades += 1;
     });
     let cumulative = 0;
-    const chartData = Object.values(dailyMap).map(d => { cumulative += d.pnl; return { ...d, cumulative }; });
+    let peak = 0;
+    const chartData = Object.values(dailyMap).map(d => { 
+      cumulative += d.pnl; 
+      if (cumulative > peak) peak = cumulative;
+      const drawdown = peak - cumulative;
+      return { ...d, cumulative, drawdown: parseFloat(drawdown.toFixed(2)) }; 
+    });
     res.json({ chartData });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -132,8 +179,12 @@ router.get('/pnl-chart', async (req, res) => {
 // ── GET /api/analytics/by-symbol ─────────────────────────────────────────────
 router.get('/by-symbol', async (req, res) => {
   try {
+    const { strategy } = req.query;
+    const where = { userId: req.user.id, status: { [Op.in]: ['CLOSED', 'EXPIRED'] } };
+    if (strategy) where.strategy = strategy;
+
     const data = await Trade.findAll({
-      where: { userId: req.user.id, status: 'CLOSED' },
+      where,
       attributes: [
         ['underlying', '_id'],
         [sequelize.fn('count', sequelize.col('id')), 'totalTrades'],
@@ -159,28 +210,105 @@ router.get('/by-symbol', async (req, res) => {
 // ── GET /api/analytics/by-strategy ───────────────────────────────────────────
 router.get('/by-strategy', async (req, res) => {
   try {
-    const data = await Trade.findAll({
+    const trades = await Trade.findAll({
       where: {
         userId: req.user.id,
-        status: 'CLOSED',
+        status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
         strategy: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] }
       },
-      attributes: [
-        ['strategy', '_id'],
-        [sequelize.fn('count', sequelize.col('id')), 'totalTrades'],
-        [sequelize.fn('sum', sequelize.col('netPnl')), 'totalPnl'],
-        [sequelize.fn('sum', sequelize.literal('CASE WHEN "netPnl" > 0 THEN 1 ELSE 0 END')), 'wins']
-      ],
-      group: ['strategy'],
-      order: [[sequelize.literal('"totalPnl"'), 'DESC']],
+      order: [['exitDate', 'ASC'], ['entryDate', 'ASC']],
       raw: true
     });
-    const formatted = data.map(d => ({
-      ...d,
-      totalTrades: parseInt(d.totalTrades),
-      totalPnl: parseFloat(d.totalPnl),
-      wins: parseInt(d.wins)
-    }));
+
+    const stats = {};
+    trades.forEach(t => {
+      const s = t.strategy;
+      if (!stats[s]) {
+        stats[s] = {
+          _id: s,
+          totalTrades: 0,
+          totalPnl: 0,
+          wins: 0,
+          grossWin: 0,
+          grossLoss: 0,
+          peak: 0,
+          runningPnl: 0,
+          maxDD: 0,
+          totalHoldMins: 0,
+          holdCount: 0,
+          plannedRRSum: 0,
+          plannedRRCount: 0,
+          actualRRSum: 0,
+          actualRRCount: 0
+        };
+      }
+      const st = stats[s];
+      const pnl = t.netPnl || 0;
+      st.totalTrades++;
+      st.totalPnl += pnl;
+      st.runningPnl += pnl;
+      if (st.runningPnl > st.peak) st.peak = st.runningPnl;
+      const dd = st.peak - st.runningPnl;
+      if (dd > st.maxDD) st.maxDD = dd;
+
+      if (pnl > 0) {
+        st.wins++;
+        st.grossWin += pnl;
+      } else if (pnl < 0) {
+        st.grossLoss += Math.abs(pnl);
+      }
+
+      if (t.entryDate && t.exitDate) {
+        const start = new Date(t.entryDate);
+        const end = new Date(t.exitDate);
+        const diffMs = end - start;
+        const diffDays = Math.floor(diffMs / 86400000);
+        const mins = diffDays === 0 ? (diffMs / 60000) : (diffDays * 375);
+        st.totalHoldMins += mins;
+        st.holdCount++;
+      }
+
+      // R:R
+      if (t.stopLoss && t.target && t.entryPrice) {
+        const risk = Math.abs(t.entryPrice - t.stopLoss);
+        const reward = Math.abs(t.target - t.entryPrice);
+        if (risk > 0) {
+          st.plannedRRSum += (reward / risk);
+          st.plannedRRCount++;
+        }
+      }
+      if (t.stopLoss && t.entryPrice) {
+        const risk = Math.abs(t.entryPrice - t.stopLoss);
+        const exit = t.status === 'EXPIRED' ? 0 : (t.exitPrice || 0);
+        const actualReward = (t.tradeType === 'BUY' ? 1 : -1) * (exit - t.entryPrice);
+        if (risk > 0) {
+          st.actualRRSum += (actualReward / risk);
+          st.actualRRCount++;
+        }
+      }
+    });
+
+    const formatted = Object.values(stats).map(s => {
+      const avgWin = s.wins > 0 ? s.grossWin / s.wins : 0;
+      const losses = s.totalTrades - s.wins;
+      const avgLoss = losses > 0 ? s.grossLoss / losses : 0;
+      
+      return {
+        _id: s._id,
+        totalTrades: s.totalTrades,
+        totalPnl: parseFloat(s.totalPnl.toFixed(2)),
+        wins: s.wins,
+        winRate: (s.wins / s.totalTrades) * 100,
+        avgWin: parseFloat(avgWin.toFixed(2)),
+        avgLoss: parseFloat(avgLoss.toFixed(2)),
+        profitFactor: s.grossLoss > 0 ? parseFloat((s.grossWin / s.grossLoss).toFixed(2)) : (s.grossWin > 0 ? 99 : 0),
+        maxDrawdown: parseFloat(s.maxDD.toFixed(2)),
+        avgHoldTime: s.holdCount > 0 ? Math.round(s.totalHoldMins / s.holdCount) : 0,
+        plannedRR: s.plannedRRCount > 0 ? parseFloat((s.plannedRRSum / s.plannedRRCount).toFixed(2)) : 0,
+        actualRR: s.actualRRCount > 0 ? parseFloat((s.actualRRSum / s.actualRRCount).toFixed(2)) : 0
+      };
+    }).sort((a, b) => b.totalPnl - a.totalPnl);
+
     res.json({ data: formatted });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -188,27 +316,92 @@ router.get('/by-strategy', async (req, res) => {
 // ── GET /api/analytics/psychology ─────────────────────────────────────────────
 router.get('/psychology', async (req, res) => {
   try {
-    const trades = await Trade.findAll({
-      where: {
-        userId: req.user.id,
-        status: 'CLOSED',
-        'psychology.emotionBefore': { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] }
-      }
-    });
-    if (!trades.length) return res.json({ totalLogged: 0, avgDiscipline: 0, followedPlanRate: 0, revengeTrades: 0, revengeTradeLoss: 0, fomoTrades: 0, overtradingCount: 0, mostCommonMistake: null, emotionWinRate: [], mistakeFrequency: [], lossByEmotion: [] });
+    const { strategy } = req.query;
+    const where = {
+      userId: req.user.id,
+      status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
+    };
+    if (strategy) where.strategy = strategy;
 
-    const withDisc = trades.filter(t => t.psychology?.disciplineRating != null);
+    const trades = await Trade.findAll({ 
+      where,
+      order: [['exitDate', 'ASC'], ['entryDate', 'ASC']]
+    });
+    
+    // Filter to only trades that HAVE psychology data logged
+    const loggedTrades = trades.filter(t => t.psychology?.emotionBefore != null && t.psychology?.emotionBefore !== '');
+    if (!loggedTrades.length) return res.json({ totalLogged: 0, avgDiscipline: 0, followedPlanRate: 0, revengeTrades: 0, revengeTradeLoss: 0, fomoTrades: 0, overtradingCount: 0, mostCommonMistake: null, emotionWinRate: [], mistakeFrequency: [], lossByEmotion: [] });
+
+    // 1. Core Metrics
+    const withDisc = loggedTrades.filter(t => t.psychology?.disciplineRating != null);
     const avgDiscipline = withDisc.length ? withDisc.reduce((s,t) => s + t.psychology.disciplineRating, 0) / withDisc.length : 0;
-    const withPlan = trades.filter(t => t.psychology?.followedPlan != null);
+    
+    const withPlan = loggedTrades.filter(t => t.psychology?.followedPlan != null);
     const followedPlanRate = withPlan.length ? (withPlan.filter(t => t.psychology.followedPlan).length / withPlan.length) * 100 : 0;
 
+    // 2. Plan Adherence P&L
+    const planPerformance = {
+      followed: { total: 0, avg: 0, count: 0 },
+      deviated: { total: 0, avg: 0, count: 0 }
+    };
+    withPlan.forEach(t => {
+      const cohort = t.psychology.followedPlan ? planPerformance.followed : planPerformance.deviated;
+      cohort.total += (t.netPnl || 0);
+      cohort.count++;
+    });
+    if (planPerformance.followed.count) planPerformance.followed.avg = planPerformance.followed.total / planPerformance.followed.count;
+    if (planPerformance.deviated.count) planPerformance.deviated.avg = planPerformance.deviated.total / planPerformance.deviated.count;
+
+    // 3. Sequential Post-Loss Performance
+    let postLossCount = 0, postLossWins = 0, postLossPnl = 0;
+    for (let i = 1; i < trades.length; i++) {
+      const prev = trades[i-1];
+      const curr = trades[i];
+      if ((prev.netPnl || 0) < 0) {
+        postLossCount++;
+        postLossPnl += (curr.netPnl || 0);
+        if ((curr.netPnl || 0) > 0) postLossWins++;
+      }
+    }
+    const postLossPerformance = {
+      count: postLossCount,
+      winRate: postLossCount ? (postLossWins / postLossCount) * 100 : 0,
+      avgPnl: postLossCount ? postLossPnl / postLossCount : 0
+    };
+
+    // 4. Day of Week Psychology
+    const dayPsych = {};
+    const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    loggedTrades.forEach(t => {
+      const day = DAYS[new Date(t.exitDate).getDay()];
+      if (!dayPsych[day]) dayPsych[day] = { disciplineSum: 0, count: 0, negativeEmotions: 0 };
+      const dp = dayPsych[day];
+      dp.disciplineSum += (t.psychology.disciplineRating || 0);
+      dp.count++;
+      if (['fearful', 'frustrated', 'revenge'].includes(t.psychology.emotionBefore)) dp.negativeEmotions++;
+    });
+    const dayOfWeekPsych = Object.entries(dayPsych).map(([day, d]) => ({
+      day,
+      avgDiscipline: d.disciplineSum / d.count,
+      negativeRatio: (d.negativeEmotions / d.count) * 100
+    }));
+
+    // 5. Discipline Trend
+    let disciplineTrend = 'flat';
+    if (withDisc.length >= 5) {
+      const recentCount = Math.max(3, Math.ceil(withDisc.length * 0.2));
+      const recentAvg = withDisc.slice(-recentCount).reduce((s,t) => s + t.psychology.disciplineRating, 0) / recentCount;
+      if (recentAvg > avgDiscipline + 0.5) disciplineTrend = 'up';
+      else if (recentAvg < avgDiscipline - 0.5) disciplineTrend = 'down';
+    }
+
     const mistakeCount = {};
-    trades.forEach(t => (t.psychology?.mistakeTags || []).forEach(tag => { mistakeCount[tag] = (mistakeCount[tag] || 0) + 1; }));
+    loggedTrades.forEach(t => (t.psychology?.mistakeTags || []).forEach(tag => { mistakeCount[tag] = (mistakeCount[tag] || 0) + 1; }));
     const mistakeFrequency = Object.entries(mistakeCount).map(([tag, count]) => ({ tag, count })).sort((a,b) => b.count - a.count);
 
-    const revengeTrades = trades.filter(t => (t.psychology?.mistakeTags||[]).includes('revenge_trade'));
+    const revengeTrades = loggedTrades.filter(t => (t.psychology?.mistakeTags||[]).includes('revenge_trade'));
     const emoMap = {};
-    trades.forEach(t => {
+    loggedTrades.forEach(t => {
       const em = t.psychology?.emotionBefore; if (!em) return;
       if (!emoMap[em]) emoMap[em] = { wins: 0, total: 0, pnl: 0 };
       emoMap[em].total++; emoMap[em].pnl += t.netPnl || 0;
@@ -217,7 +410,7 @@ router.get('/psychology', async (req, res) => {
     const emotionWinRate = Object.entries(emoMap).map(([emotion, d]) => ({ emotion, trades: d.total, wins: d.wins, winRate: d.total ? parseFloat(((d.wins/d.total)*100).toFixed(1)) : 0, totalPnl: parseFloat(d.pnl.toFixed(2)) })).sort((a,b) => b.trades - a.trades);
 
     const afterMap = {};
-    trades.forEach(t => {
+    loggedTrades.forEach(t => {
       const em = t.psychology?.emotionAfter; if (!em) return;
       if (!afterMap[em]) afterMap[em] = { total: 0, pnl: 0 };
       afterMap[em].total++; afterMap[em].pnl += t.netPnl || 0;
@@ -225,11 +418,17 @@ router.get('/psychology', async (req, res) => {
     const lossByEmotion = Object.entries(afterMap).map(([emotion, d]) => ({ emotion, trades: d.total, totalPnl: parseFloat(d.pnl.toFixed(2)) })).sort((a,b) => a.totalPnl - b.totalPnl);
 
     res.json({
-      totalLogged: trades.length, avgDiscipline: parseFloat(avgDiscipline.toFixed(1)),
+      totalLogged: loggedTrades.length, 
+      avgDiscipline: parseFloat(avgDiscipline.toFixed(1)),
+      disciplineTrend,
       followedPlanRate: parseFloat(followedPlanRate.toFixed(1)),
-      revengeTrades: revengeTrades.length, revengeTradeLoss: parseFloat(revengeTrades.reduce((s,t) => s+(t.netPnl||0), 0).toFixed(2)),
-      fomoTrades: trades.filter(t => (t.psychology?.mistakeTags||[]).includes('fomo_entry')).length,
-      overtradingCount: trades.filter(t => (t.psychology?.mistakeTags||[]).includes('overtrading')).length,
+      planPerformance,
+      postLossPerformance,
+      dayOfWeekPsych,
+      revengeTrades: revengeTrades.length, 
+      revengeTradeLoss: parseFloat(revengeTrades.reduce((s,t) => s+(t.netPnl||0), 0).toFixed(2)),
+      fomoTrades: loggedTrades.filter(t => (t.psychology?.mistakeTags||[]).includes('fomo_entry')).length,
+      overtradingCount: loggedTrades.filter(t => (t.psychology?.mistakeTags||[]).includes('overtrading')).length,
       mostCommonMistake: mistakeFrequency[0]?.tag || null,
       emotionWinRate, mistakeFrequency, lossByEmotion,
     });
@@ -239,16 +438,29 @@ router.get('/psychology', async (req, res) => {
 // ── GET /api/analytics/psychology-trends ─────────────────────────────────────
 router.get('/psychology-trends', async (req, res) => {
   try {
-    const { period = 'week' } = req.query; // 'week' | 'month'
+    const { period = 'week', strategy } = req.query; // 'week' | 'month'
+    const where = {
+      userId: req.user.id,
+      status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
+      'psychology.emotionBefore': { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] }
+    };
+    if (strategy) where.strategy = strategy;
+
     const trades = await Trade.findAll({
-      where: {
-        userId: req.user.id,
-        'psychology.emotionBefore': { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] }
-      },
+      where,
       order: [['entryDate', 'ASC']]
     });
 
     if (!trades.length) return res.json({ periods: [], discipline: [], emotions: [], mistakes: [] });
+
+    // Helper for ISO week
+    function getISOWeek(d) {
+      const date = new Date(d.getTime());
+      date.setHours(0, 0, 0, 0);
+      date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
+      const week1 = new Date(date.getFullYear(), 0, 4);
+      return 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+    }
 
     // Group trades into weekly or monthly buckets
     const buckets = {};
@@ -261,10 +473,11 @@ router.get('/psychology-trends', async (req, res) => {
       if (period === 'month') {
         key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
       } else {
-        // ISO week: Monday-based
-        const day  = d.getDay() || 7; // make Sunday = 7
-        const mon  = new Date(d); mon.setDate(d.getDate() - day + 1);
-        key = `${mon.getFullYear()}-W${String(Math.ceil((((mon - new Date(mon.getFullYear(),0,1))/86400000)+1)/7)).padStart(2,'0')}`;
+        const isoW = getISOWeek(d);
+        const yr = d.getFullYear();
+        // Handle year boundary edge case for ISO week
+        const adjustedYr = (isoW === 1 && d.getMonth() === 11) ? yr + 1 : (isoW > 50 && d.getMonth() === 0) ? yr - 1 : yr;
+        key = `${adjustedYr}-W${String(isoW).padStart(2,'0')}`;
       }
       if (!buckets[key]) {
         buckets[key] = { key, disciplineSum: 0, disciplineCount: 0, emotions: {}, mistakes: {}, trades: 0, wins: 0, pnl: 0 };
@@ -308,32 +521,48 @@ router.get('/psychology-trends', async (req, res) => {
 // ── GET /api/analytics/deep ───────────────────────────────────────────────────
 router.get('/deep', async (req, res) => {
   try {
-    const { from, to } = req.query;
-    const where = { userId: req.user.id, status: 'CLOSED' };
+    const { from, to, strategy } = req.query;
+    const where = { userId: req.user.id, status: { [Op.in]: ['CLOSED', 'EXPIRED'] } };
     if (from || to) {
       where.exitDate = {};
       if (from) where.exitDate[Op.gte] = new Date(from);
       if (to)   { const t = new Date(to); t.setHours(23,59,59,999); where.exitDate[Op.lte] = t; }
     }
+    if (strategy) where.strategy = strategy;
+
     const trades = await Trade.findAll({ where, order: [['exitDate', 'ASC']] });
     if (!trades.length) return res.json({ empty: true });
 
     // ── Holding time ─────────────────────────────────────────────────────────
     const withHold = trades.filter(t => t.entryDate && t.exitDate);
-    const holdMins = withHold.map(t => (new Date(t.exitDate) - new Date(t.entryDate)) / 60000);
+    
+    function getMarketMins(entry, exit) {
+      const start = new Date(entry);
+      const end = new Date(exit);
+      const diffMs = end - start;
+      const diffDays = Math.floor(diffMs / 86400000);
+      
+      if (diffDays === 0) {
+        return diffMs / 60000; // Intraday: wall clock is fine
+      }
+      // Multi-day: 375 market mins per day
+      return diffDays * 375;
+    }
+
+    const holdMins = withHold.map(t => getMarketMins(t.entryDate, t.exitDate));
     const avgHoldMins  = holdMins.length ? holdMins.reduce((a,b)=>a+b,0) / holdMins.length : 0;
     const minHoldMins  = holdMins.length ? Math.min(...holdMins) : 0;
     const maxHoldMins  = holdMins.length ? Math.max(...holdMins) : 0;
 
     function fmtMins(m) {
       if (m < 60)   return `${Math.round(m)}m`;
-      if (m < 1440) return `${Math.floor(m/60)}h ${Math.round(m%60)}m`;
-      return `${Math.floor(m/1440)}d ${Math.floor((m%1440)/60)}h`;
+      if (m < 375)  return `${Math.floor(m/60)}h ${Math.round(m%60)}m`;
+      return `${Math.floor(m/375)}d ${Math.floor((m%375)/60)}h`;
     }
 
-    const holdBuckets = { '<15m':0, '15–60m':0, '1–4h':0, '4–24h':0, '>1d':0 };
-    const holdPnl     = { '<15m':0, '15–60m':0, '1–4h':0, '4–24h':0, '>1d':0 };
-    const holdCount   = { '<15m':0, '15–60m':0, '1–4h':0, '4–24h':0, '>1d':0 };
+    const holdBuckets = { '<15m':0, '15–60m':0, '1–4h':0, '4h-1d':0, '>1d':0 };
+    const holdPnl     = { '<15m':0, '15–60m':0, '1–4h':0, '4h-1d':0, '>1d':0 };
+    const holdCount   = { '<15m':0, '15–60m':0, '1–4h':0, '4h-1d':0, '>1d':0 };
     withHold.forEach((t, i) => {
       const m   = holdMins[i];
       const pnl = t.netPnl || 0;
@@ -341,7 +570,7 @@ router.get('/deep', async (req, res) => {
       if      (m < 15)   bucket = '<15m';
       else if (m < 60)   bucket = '15–60m';
       else if (m < 240)  bucket = '1–4h';
-      else if (m < 1440) bucket = '4–24h';
+      else if (m < 375)  bucket = '4h-1d';
       else               bucket = '>1d';
       holdBuckets[bucket]++;
       holdPnl[bucket]    += pnl;
@@ -357,8 +586,8 @@ router.get('/deep', async (req, res) => {
         if (k==='<15m')   return m<15   && pnl>0;
         if (k==='15–60m') return m>=15  && m<60  && pnl>0;
         if (k==='1–4h')   return m>=60  && m<240 && pnl>0;
-        if (k==='4–24h')  return m>=240 && m<1440&& pnl>0;
-        return m>=1440 && pnl>0;
+        if (k==='4h-1d')  return m>=240 && m<375 && pnl>0;
+        return m>=375 && pnl>0;
       }).length,
     })).filter(b => b.trades > 0);
 
@@ -430,7 +659,7 @@ router.get('/deep', async (req, res) => {
         curWin++; curLoss = 0; curLossPnl = 0;
         curWinPnl += pnl;
         if (curWin > maxWinStreak) { maxWinStreak = curWin; bestStreakPnl = curWinPnl; }
-      } else {
+      } else if (pnl < 0) {
         curLoss++; curWin = 0; curWinPnl = 0;
         curLossPnl += pnl;
         if (curLoss > maxLossStreak) { maxLossStreak = curLoss; worstStreakPnl = curLossPnl; }
@@ -440,6 +669,7 @@ router.get('/deep', async (req, res) => {
     let currentStreak = 0, currentStreakType = 'none';
     for (let i = trades.length - 1; i >= 0; i--) {
       const pnl = trades[i].netPnl || 0;
+      if (pnl === 0) continue;
       const type = pnl > 0 ? 'win' : 'loss';
       if (currentStreak === 0) { currentStreakType = type; currentStreak = 1; }
       else if (type === currentStreakType) currentStreak++;
@@ -473,7 +703,7 @@ router.get('/daily-risk-status', async (req, res) => {
     const trades = await Trade.findAll({
       where: {
         userId: req.user.id,
-        status: 'CLOSED',
+        status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
         exitDate: { [Op.gte]: fromDate, [Op.lte]: toDate }
       }
     });

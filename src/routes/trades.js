@@ -238,7 +238,7 @@ router.post('/import/csv', planGate('csvImport'), upload.single('file'), async (
       message: `${inserted.length} trades imported. ${duplicatesSkipped > 0 ? `${duplicatesSkipped} duplicates skipped.` : ''}`,
       count: inserted.length,
       broker,
-      closed: deduplicated.filter(t => t.status === 'CLOSED').length,
+      closed: deduplicated.filter(t => t.status === 'CLOSED' || t.status === 'EXPIRED').length,
       open: deduplicated.filter(t => t.status === 'OPEN').length,
       skipped: skipped.length,
       duplicatesSkipped,
@@ -316,7 +316,7 @@ router.post('/import/broker', planGate('brokerSync'), async (req, res) => {
     }
 
     const inserted = await Trade.bulkCreate(paired);
-    res.json({ message:`${inserted.length} trades synced from Dhan.`, count:inserted.length, closed:paired.filter(t=>t.status==='CLOSED').length, open:paired.filter(t=>t.status==='OPEN').length, tradeIds:inserted.map(t=>({id:t.id,symbol:t.symbol,entryDate:t.entryDate})) });
+    res.json({ message:`${inserted.length} trades synced from Dhan.`, count:inserted.length, closed:paired.filter(t=>t.status==='CLOSED'||t.status==='EXPIRED').length, open:paired.filter(t=>t.status==='OPEN').length, tradeIds:inserted.map(t=>({id:t.id,symbol:t.symbol,entryDate:t.entryDate})) });
   } catch(err) {
     res.status(500).json({ message: 'Failed to save trades: ' + err.message });
   }
@@ -460,7 +460,7 @@ router.post('/import/fyers', planGate('brokerSync'), async (req, res) => {
     res.json({
       message: `${inserted.length} trades synced from Fyers.`,
       count: inserted.length,
-      closed: paired.filter(t => t.status === 'CLOSED').length,
+      closed: paired.filter(t => t.status === 'CLOSED' || t.status === 'EXPIRED').length,
       open:   paired.filter(t => t.status === 'OPEN').length,
       tradeIds: inserted.map(t => ({ id: t.id, symbol: t.symbol, entryDate: t.entryDate })),
     });

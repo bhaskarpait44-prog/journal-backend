@@ -301,7 +301,7 @@ router.get('/by-strategy', async (req, res) => {
         winRate: (s.wins / s.totalTrades) * 100,
         avgWin: parseFloat(avgWin.toFixed(2)),
         avgLoss: parseFloat(avgLoss.toFixed(2)),
-        profitFactor: s.grossLoss > 0 ? parseFloat((s.grossWin / s.grossLoss).toFixed(2)) : (s.grossWin > 0 ? 99 : 0),
+        profitFactor: s.grossLoss > 0 ? parseFloat((s.grossWin / s.grossLoss).toFixed(2)) : (s.grossWin > 0 ? null : 0),
         maxDrawdown: parseFloat(s.maxDD.toFixed(2)),
         avgHoldTime: s.holdCount > 0 ? Math.round(s.totalHoldMins / s.holdCount) : 0,
         plannedRR: s.plannedRRCount > 0 ? parseFloat((s.plannedRRSum / s.plannedRRCount).toFixed(2)) : 0,
@@ -353,10 +353,11 @@ router.get('/psychology', async (req, res) => {
     if (planPerformance.deviated.count) planPerformance.deviated.avg = planPerformance.deviated.total / planPerformance.deviated.count;
 
     // 3. Sequential Post-Loss Performance
+    const settledTrades = trades.filter(t => t.status !== 'OPEN');
     let postLossCount = 0, postLossWins = 0, postLossPnl = 0;
-    for (let i = 1; i < trades.length; i++) {
-      const prev = trades[i-1];
-      const curr = trades[i];
+    for (let i = 1; i < settledTrades.length; i++) {
+      const prev = settledTrades[i-1];
+      const curr = settledTrades[i];
       if ((prev.netPnl || 0) < 0) {
         postLossCount++;
         postLossPnl += (curr.netPnl || 0);
@@ -373,7 +374,7 @@ router.get('/psychology', async (req, res) => {
     const dayPsych = {};
     const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     loggedTrades.forEach(t => {
-      const day = DAYS[new Date(t.exitDate).getDay()];
+      const day = DAYS[new Date(t.exitDate || t.entryDate).getDay()];
       if (!dayPsych[day]) dayPsych[day] = { disciplineSum: 0, count: 0, negativeEmotions: 0 };
       const dp = dayPsych[day];
       dp.disciplineSum += (t.psychology.disciplineRating || 0);

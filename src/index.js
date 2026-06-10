@@ -20,6 +20,7 @@ import subscriptionRoutes  from './routes/subscription.js';
 import nseRoutes          from './routes/nse.js';
 import exportRoutes       from './routes/export.js';
 import fyersRoutes        from './routes/fyers.js';
+import candleRoutes       from './routes/candles.js';
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -48,6 +49,7 @@ app.use('/api/subscription',  subscriptionRoutes);
 app.use('/api/nse',           nseRoutes);
 app.use('/api/export',        exportRoutes);
 app.use('/api/fyers',         fyersRoutes);
+app.use('/api/candles',       candleRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'OK', database: 'connected' }));
 

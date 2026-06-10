@@ -51,17 +51,31 @@ function buildPositions(rawTrades, userId, source, brokerName) {
   return paired;
 }
 
+function parseDateBoundary(value, boundary) {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const time = boundary === 'end' ? '23:59:59.999' : '00:00:00.000';
+    return new Date(`${value}T${time}+05:30`);
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 router.get('/', async (req, res) => {
   try {
-    const { status, symbol, from, to, optionType, page=1, limit=50 } = req.query;
+    const { status, symbol, underlying, from, to, optionType, page=1, limit=50 } = req.query;
     const where = { userId: req.user.id };
     if (status)     where.status     = status;
     if (optionType) where.optionType = optionType;
     if (symbol)     where.symbol     = { [Op.iLike]: `%${symbol}%` };
+    if (underlying) where.underlying = { [Op.iLike]: underlying };
     if (from || to) {
       where.entryDate = {};
-      if (from) where.entryDate[Op.gte] = new Date(from);
-      if (to)   where.entryDate[Op.lte] = new Date(to);
+      const fromDate = parseDateBoundary(from, 'start');
+      const toDate = parseDateBoundary(to, 'end');
+      if (fromDate) where.entryDate[Op.gte] = fromDate;
+      if (toDate)   where.entryDate[Op.lte] = toDate;
     }
     const total  = await Trade.count({ where });
     const trades = await Trade.findAll({
@@ -71,6 +85,14 @@ router.get('/', async (req, res) => {
       limit: +limit
     });
     res.json({ trades, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch(err){res.status(500).json({message:err.message});}
+});
+
+router.get('/:id', async (req, res) => {
+  try {
+    const trade = await Trade.findOne({ where: { id: req.params.id, userId: req.user.id } });
+    if (!trade) return res.status(404).json({ message: 'Trade not found.' });
+    res.json(trade);
   } catch(err){res.status(500).json({message:err.message});}
 });
 
@@ -114,6 +136,48 @@ router.post('/', planGate('tradeLimit'), async (req, res) => {
     const trade = await Trade.create(body);
     res.status(201).json({ trade });
   } catch(err) { res.status(400).json({ message: err.message }); }
+});
+
+router.put('/:id/close', async (req, res) => {
+  try {
+    const trade = await Trade.findOne({ where: { id: req.params.id, userId: req.user.id } });
+    if (!trade) return res.status(404).json({ message: 'Trade not found.' });
+
+    const exitPrice = parseFloat(req.body.exitPrice);
+    const exitDate = req.body.exitDate ? new Date(req.body.exitDate) : new Date();
+
+    if (!Number.isFinite(exitPrice)) {
+      return res.status(400).json({ message: 'Valid exit price is required.' });
+    }
+
+    if (Number.isNaN(exitDate.getTime())) {
+      return res.status(400).json({ message: 'Valid exit date is required.' });
+    }
+
+    if (exitDate < new Date(trade.entryDate)) {
+      return res.status(400).json({ message: 'Exit date cannot be before entry date.' });
+    }
+
+    const exchange = trade.exchange || 'NSE';
+    const charges = calcCharges(
+      trade.entryPrice,
+      exitPrice,
+      trade.lotSize,
+      trade.quantity,
+      trade.tradeType,
+      exchange,
+      'CLOSED'
+    ).total;
+
+    await trade.update({
+      exitPrice,
+      exitDate,
+      status: 'CLOSED',
+      charges,
+    });
+
+    res.json({ trade });
+  } catch(err){res.status(400).json({message:err.message});}
 });
 
 router.put('/:id', async (req, res) => {

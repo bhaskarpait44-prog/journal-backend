@@ -4,11 +4,9 @@ import Trade from '../models/Trade.js';
 import User from '../models/User.js';
 import sequelize from '../lib/sequelize.js';
 import { protect } from '../middleware/auth.js';
-import { planGate } from '../middleware/planGate.js';
 
 const router = express.Router();
 router.use(protect);
-router.use(planGate('analytics'));
 
 // ── GET /api/analytics/summary ────────────────────────────────────────────────
 router.get('/summary', async (req, res) => {
@@ -81,27 +79,21 @@ router.get('/summary', async (req, res) => {
         curLoss++; curWin = 0; curWinPnl = 0; curLossPnl += pnl;
         if (curLoss > maxLossStreak) { maxLossStreak = curLoss; worstStreakPnl = curLossPnl; }
       }
-      // Neutral pnl (0) doesn't reset or increment streaks
     });
 
-    // Expectancy = (Win% * AvgWin) + (Loss% * AvgLoss)
     const totalCount = parseInt(aggResult.total || 0);
     const winRate = totalCount ? (parseInt(aggResult.winners || 0) / totalCount) : 0;
     const lossRate = 1 - winRate;
     const expectancy = (winRate * avgWin) + (lossRate * avgLoss);
 
-    // Kelly Criterion: K% = W - [(1 - W) / R] 
-    // R = Avg Win / Avg Loss
     const rRatio = Math.abs(avgLoss) > 0 ? Math.abs(avgWin / avgLoss) : 0;
     let kellyPct = 0;
     if (rRatio > 0 && winRate > 0) {
       kellyPct = winRate - (lossRate / rRatio);
     }
 
-    // Recovery Factor = Total Pnl / Max Drawdown
     const recoveryFactor = maxDD > 0 ? (totalPnl / maxDD) : 0;
 
-    // Current streak — walk backwards from most recent trade, ignoring break-even
     let currentStreak = 0, currentStreakType = 'none', currentStreakPnl = 0;
     for (let i = trades.length - 1; i >= 0; i--) {
       const pnl  = trades[i].netPnl || 0;
@@ -137,14 +129,12 @@ router.get('/summary', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/pnl-chart ─────────────────────────────────────────────
 router.get('/pnl-chart', async (req, res) => {
   try {
     const { days = 30, from: fromQ, to: toQ, strategy } = req.query;
-    // Accept explicit from/to OR fall back to days-ago
     const fromDate = fromQ ? new Date(fromQ) : (() => { const d = new Date(); d.setDate(d.getDate() - Number(days)); return d; })();
     const toDate   = toQ   ? new Date(toQ)   : new Date();
-    toDate.setHours(23, 59, 59, 999); // include full last day
+    toDate.setHours(23, 59, 59, 999);
 
     const where = {
       userId: req.user.id,
@@ -176,7 +166,6 @@ router.get('/pnl-chart', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/by-symbol ─────────────────────────────────────────────
 router.get('/by-symbol', async (req, res) => {
   try {
     const { strategy } = req.query;
@@ -196,7 +185,6 @@ router.get('/by-symbol', async (req, res) => {
       limit: 10,
       raw: true
     });
-    // Convert string numeric fields to numbers
     const formatted = data.map(d => ({
       ...d,
       totalTrades: parseInt(d.totalTrades),
@@ -207,7 +195,6 @@ router.get('/by-symbol', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/by-strategy ───────────────────────────────────────────
 router.get('/by-strategy', async (req, res) => {
   try {
     const trades = await Trade.findAll({
@@ -268,7 +255,6 @@ router.get('/by-strategy', async (req, res) => {
         st.holdCount++;
       }
 
-      // R:R
       if (t.stopLoss && t.target && t.entryPrice) {
         const risk = Math.abs(t.entryPrice - t.stopLoss);
         const reward = Math.abs(t.target - t.entryPrice);
@@ -313,7 +299,6 @@ router.get('/by-strategy', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/psychology ─────────────────────────────────────────────
 router.get('/psychology', async (req, res) => {
   try {
     const { strategy } = req.query;
@@ -328,18 +313,15 @@ router.get('/psychology', async (req, res) => {
       order: [['exitDate', 'ASC'], ['entryDate', 'ASC']]
     });
     
-    // Filter to only trades that HAVE psychology data logged
     const loggedTrades = trades.filter(t => t.psychology?.emotionBefore != null && t.psychology?.emotionBefore !== '');
     if (!loggedTrades.length) return res.json({ totalLogged: 0, avgDiscipline: 0, followedPlanRate: 0, revengeTrades: 0, revengeTradeLoss: 0, fomoTrades: 0, overtradingCount: 0, mostCommonMistake: null, emotionWinRate: [], mistakeFrequency: [], lossByEmotion: [] });
 
-    // 1. Core Metrics
     const withDisc = loggedTrades.filter(t => t.psychology?.disciplineRating != null);
     const avgDiscipline = withDisc.length ? withDisc.reduce((s,t) => s + t.psychology.disciplineRating, 0) / withDisc.length : 0;
     
     const withPlan = loggedTrades.filter(t => t.psychology?.followedPlan != null);
     const followedPlanRate = withPlan.length ? (withPlan.filter(t => t.psychology.followedPlan).length / withPlan.length) * 100 : 0;
 
-    // 2. Plan Adherence P&L
     const planPerformance = {
       followed: { total: 0, avg: 0, count: 0 },
       deviated: { total: 0, avg: 0, count: 0 }
@@ -352,7 +334,6 @@ router.get('/psychology', async (req, res) => {
     if (planPerformance.followed.count) planPerformance.followed.avg = planPerformance.followed.total / planPerformance.followed.count;
     if (planPerformance.deviated.count) planPerformance.deviated.avg = planPerformance.deviated.total / planPerformance.deviated.count;
 
-    // 3. Sequential Post-Loss Performance
     const settledTrades = trades.filter(t => t.status !== 'OPEN');
     let postLossCount = 0, postLossWins = 0, postLossPnl = 0;
     for (let i = 1; i < settledTrades.length; i++) {
@@ -370,7 +351,6 @@ router.get('/psychology', async (req, res) => {
       avgPnl: postLossCount ? postLossPnl / postLossCount : 0
     };
 
-    // 4. Day of Week Psychology
     const dayPsych = {};
     const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     loggedTrades.forEach(t => {
@@ -387,7 +367,6 @@ router.get('/psychology', async (req, res) => {
       negativeRatio: (d.negativeEmotions / d.count) * 100
     }));
 
-    // 5. Discipline Trend
     let disciplineTrend = 'flat';
     if (withDisc.length >= 5) {
       const recentCount = Math.max(3, Math.ceil(withDisc.length * 0.2));
@@ -436,10 +415,9 @@ router.get('/psychology', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/psychology-trends ─────────────────────────────────────
 router.get('/psychology-trends', async (req, res) => {
   try {
-    const { period = 'week', strategy } = req.query; // 'week' | 'month'
+    const { period = 'week', strategy } = req.query;
     const where = {
       userId: req.user.id,
       status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
@@ -454,7 +432,6 @@ router.get('/psychology-trends', async (req, res) => {
 
     if (!trades.length) return res.json({ periods: [], discipline: [], emotions: [], mistakes: [] });
 
-    // Helper for ISO week
     function getISOWeek(d) {
       const date = new Date(d.getTime());
       date.setHours(0, 0, 0, 0);
@@ -463,7 +440,6 @@ router.get('/psychology-trends', async (req, res) => {
       return 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
     }
 
-    // Group trades into weekly or monthly buckets
     const buckets = {};
     const MISTAKES = ['fomo_entry', 'revenge_trade', 'overtrading', 'no_stoploss', 'oversized_position', 'early_exit', 'late_entry'];
     const EMOTIONS  = ['calm', 'confident', 'fearful', 'frustrated', 'overconfident', 'revenge'];
@@ -476,7 +452,6 @@ router.get('/psychology-trends', async (req, res) => {
       } else {
         const isoW = getISOWeek(d);
         const yr = d.getFullYear();
-        // Handle year boundary edge case for ISO week
         const adjustedYr = (isoW === 1 && d.getMonth() === 11) ? yr + 1 : (isoW > 50 && d.getMonth() === 0) ? yr - 1 : yr;
         key = `${adjustedYr}-W${String(isoW).padStart(2,'0')}`;
       }
@@ -519,7 +494,6 @@ router.get('/psychology-trends', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/deep ───────────────────────────────────────────────────
 router.get('/deep', async (req, res) => {
   try {
     const { from, to, strategy } = req.query;
@@ -534,7 +508,6 @@ router.get('/deep', async (req, res) => {
     const trades = await Trade.findAll({ where, order: [['exitDate', 'ASC']] });
     if (!trades.length) return res.json({ empty: true });
 
-    // ── Holding time ─────────────────────────────────────────────────────────
     const withHold = trades.filter(t => t.entryDate && t.exitDate);
     
     function getMarketMins(entry, exit) {
@@ -544,9 +517,8 @@ router.get('/deep', async (req, res) => {
       const diffDays = Math.floor(diffMs / 86400000);
       
       if (diffDays === 0) {
-        return diffMs / 60000; // Intraday: wall clock is fine
+        return diffMs / 60000;
       }
-      // Multi-day: 375 market mins per day
       return diffDays * 375;
     }
 
@@ -592,13 +564,12 @@ router.get('/deep', async (req, res) => {
       }).length,
     })).filter(b => b.trades > 0);
 
-    // ── Time of day (IST = UTC+5:30) ──────────────────────────────────────────
     const hourSlots = {};
     trades.forEach(t => {
       if (!t.entryDate) return;
       const utcH = new Date(t.entryDate).getUTCHours();
       const utcM = new Date(t.entryDate).getUTCMinutes();
-      const istMins = utcH * 60 + utcM + 330; // +5:30
+      const istMins = utcH * 60 + utcM + 330;
       const istH    = Math.floor((istMins % 1440) / 60);
       const label = `${istH}:00`;
       if (!hourSlots[label]) hourSlots[label] = { label, trades:0, totalPnl:0, wins:0 };
@@ -610,7 +581,6 @@ router.get('/deep', async (req, res) => {
       .map(s => ({ ...s, totalPnl: parseFloat(s.totalPnl.toFixed(2)), avgPnl: parseFloat((s.totalPnl/s.trades).toFixed(2)), winRate: parseFloat(((s.wins/s.trades)*100).toFixed(1)) }))
       .sort((a,b) => parseInt(a.label) - parseInt(b.label));
 
-    // ── Day of week ───────────────────────────────────────────────────────────
     const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const daySlots = {};
     trades.forEach(t => {
@@ -631,7 +601,6 @@ router.get('/deep', async (req, res) => {
         winRate:  parseFloat(((daySlots[d].wins / daySlots[d].trades) * 100).toFixed(1)),
       }));
 
-    // ── Charges impact ────────────────────────────────────────────────────────
     const grossPnl      = trades.reduce((s,t) => s + (t.pnl     || 0), 0);
     const totalCharges  = trades.reduce((s,t) => s + (t.charges || 0), 0);
     const netPnl        = trades.reduce((s,t) => s + (t.netPnl  || 0), 0);
@@ -648,7 +617,6 @@ router.get('/deep', async (req, res) => {
       chargesAteIt,
     };
 
-    // ── Streaks ───────────────────────────────────────────────────────────────
     let curWin = 0, curLoss = 0;
     let maxWinStreak = 0, maxLossStreak = 0;
     let curWinPnl = 0, bestStreakPnl = 0;
@@ -693,7 +661,6 @@ router.get('/deep', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── GET /api/analytics/daily-risk-status ──────────────────────────────────────
 router.get('/daily-risk-status', async (req, res) => {
   try {
     const fromDate = new Date();

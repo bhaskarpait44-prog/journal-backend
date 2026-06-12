@@ -6,11 +6,9 @@ import { Op } from 'sequelize';
 
 const router = express.Router();
 
-// ── Helper: send email via nodemailer ─────────────────────────────────────────
 async function sendEmail({ to, subject, html }) {
   const { default: nodemailer } = await import('nodemailer');
 
-  // Use SMTP config from .env, fall back to Ethereal for dev
   let transporter;
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     transporter = nodemailer.createTransport({
@@ -20,7 +18,6 @@ async function sendEmail({ to, subject, html }) {
       auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
   } else {
-    // Dev mode — create Ethereal test account and log preview URL
     const testAccount = await nodemailer.createTestAccount();
     transporter = nodemailer.createTransport({
       host: 'smtp.ethereal.email', port: 587, secure: false,
@@ -40,7 +37,6 @@ async function sendEmail({ to, subject, html }) {
   return info;
 }
 
-// ── POST /api/auth/signup ─────────────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -59,7 +55,7 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({
         success:  false,
         message:  'Email already exists. Please sign in.',
-        redirect: 'login',   // hint for frontend to redirect
+        redirect: 'login',
       });
 
     const user  = await User.create({ name: name.trim(), email: normalEmail, password, authProvider: 'local' });
@@ -72,7 +68,6 @@ router.post('/signup', async (req, res) => {
   }
 });
 
-// ── POST /api/auth/login ──────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -94,7 +89,6 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// ── POST /api/auth/google ─────────────────────────────────────────────────────
 router.post('/google', async (req, res) => {
   try {
     if (!process.env.GOOGLE_CLIENT_ID)
@@ -134,7 +128,6 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// ── POST /api/auth/forgot-password ───────────────────────────────────────────
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -143,7 +136,6 @@ router.post('/forgot-password', async (req, res) => {
 
     const user = await User.findOne({ where: { email: email.toLowerCase().trim() } });
 
-    // Always return 200 to prevent email enumeration — only send email if found
     if (!user) {
       return res.json({ success: false, message: 'No account found with this email.' });
     }
@@ -152,9 +144,8 @@ router.post('/forgot-password', async (req, res) => {
       return res.json({ success: false, message: 'This account uses Google Sign-In. Please log in with Google.' });
     }
 
-    // Generate secure reset token
     const resetToken   = crypto.randomBytes(32).toString('hex');
-    const resetExpiry  = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    const resetExpiry  = new Date(Date.now() + 60 * 60 * 1000);
 
     user.passwordResetToken  = crypto.createHash('sha256').update(resetToken).digest('hex');
     user.passwordResetExpiry = resetExpiry;
@@ -203,7 +194,6 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-// ── POST /api/auth/reset-password ─────────────────────────────────────────────
 router.post('/reset-password', async (req, res) => {
   try {
     const { token, email, password } = req.body;
@@ -213,21 +203,19 @@ router.post('/reset-password', async (req, res) => {
     if (password.length < 6)
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
 
-    // Hash the incoming token and compare
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     const user = await User.findOne({
       where: {
         email:                email.toLowerCase().trim(),
         passwordResetToken:   hashedToken,
-        passwordResetExpiry:  { [Op.gt]: new Date() },   // not expired
+        passwordResetExpiry:  { [Op.gt]: new Date() },
       }
     });
 
     if (!user)
       return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired. Please request a new one.' });
 
-    // Set new password and clear reset fields
     user.password            = password;
     user.passwordResetToken  = null;
     user.passwordResetExpiry = null;
@@ -240,26 +228,6 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// ── GET /api/auth/me ──────────────────────────────────────────────────────────
 router.get('/me', protect, (req, res) => res.json({ success: true, user: req.user }));
-
-// ── POST /api/auth/subscribe ──────────────────────────────────────────────────
-router.post('/subscribe', protect, async (req, res) => {
-  try {
-    const { plan, status, expiry } = req.body;
-    if (!plan || !status) return res.status(400).json({ success: false, message: 'Plan and status are required.' });
-    
-    await req.user.update({
-      subscription: {
-        ...req.user.subscription,
-        plan,
-        status,
-        expiry
-      }
-    });
-    
-    res.json({ success: true, user: req.user.toJSON(), subscription: req.user.subscription });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
 
 export default router;

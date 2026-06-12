@@ -2,7 +2,6 @@ import express from 'express';
 import multer from 'multer';
 import Trade from '../models/Trade.js';
 import { protect } from '../middleware/auth.js';
-import { planGate } from '../middleware/planGate.js';
 import { parseCSVBuffer } from '../lib/csvParser.js';
 import { calcCharges } from '../lib/calcCharges.js';
 import { Op } from 'sequelize';
@@ -14,7 +13,6 @@ router.use(protect);
 function buildPositions(rawTrades, userId, source, brokerName) {
   const paired = [], buyPool = {}, sellPool = {};
   
-  // Separate already closed trades (e.g. from Dhan P&L or Broker API) from those that need FIFO pairing
   const alreadyClosed = rawTrades.filter(t => t.status === 'CLOSED' || t.status === 'EXPIRED');
   const needsPairing  = rawTrades.filter(t => t.status !== 'CLOSED' && t.status !== 'EXPIRED');
   
@@ -103,20 +101,11 @@ router.get('/:id', async (req, res) => {
   } catch(err){res.status(500).json({message:err.message});}
 });
 
-router.post('/', planGate('tradeLimit'), async (req, res) => {
+router.post('/', async (req, res) => {
   try {
-    const limit = req.planFlags?.tradeLimit || -1;
-    if (limit !== -1) {
-      const count = await Trade.count({ where: { userId: req.user.id } });
-      if (count >= limit) {
-        return res.status(403).json({ message: 'Upgrade your plan to log more trades.' });
-      }
-    }
-
     const body     = { ...req.body, userId: req.user.id, source: 'manual' };
     const exchange = body.exchange || 'NSE';
 
-    // Date Validations
     const today = new Date().toISOString().split('T')[0];
     const entryDateStr = new Date(body.entryDate).toISOString().split('T')[0];
     
@@ -133,7 +122,6 @@ router.post('/', planGate('tradeLimit'), async (req, res) => {
       }
     }
 
-    // Always auto-calculate — ignore any charges sent from client
     const isSettled = body.status === 'CLOSED' || body.status === 'EXPIRED';
     if (isSettled) {
       body.charges = calcCharges(body.entryPrice, body.exitPrice || 0, body.lotSize, body.quantity, body.tradeType, exchange, body.status).total;
@@ -205,7 +193,6 @@ router.put('/:id', async (req, res) => {
     const entryDate = body.entryDate || trade.entryDate;
     const exitDate  = body.exitDate  || trade.exitDate;
 
-    // Date Validations
     const today = new Date().toISOString().split('T')[0];
     const entryDateStr = new Date(entryDate).toISOString().split('T')[0];
 
@@ -222,13 +209,11 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    // Recalculate charges whenever trade is updated
     if (status === 'CLOSED' || status === 'EXPIRED') {
       body.charges = calcCharges(entry, exit || 0, lotSize, qty, type, exchange, status).total;
     } else {
       body.charges = calcCharges(entry, 0, lotSize, qty, type, exchange, status).total;
     }
-
 
     body.psychology = psych;
     
@@ -277,21 +262,12 @@ router.get('/:id/psychology', async (req, res) => {
   } catch(err){res.status(500).json({message:err.message});}
 });
 
-router.post('/import/csv', planGate('csvImport'), upload.single('file'), async (req, res) => {
+router.post('/import/csv', upload.single('file'), async (req, res) => {
   try {
     if(!req.file) return res.status(400).json({message:'No file uploaded.'});
     const {broker,trades:rawTrades,skipped} = parseCSVBuffer(req.file.buffer,req.user.id);
     if(!rawTrades.length) return res.status(400).json({message:`No options trades found. Broker: ${broker}.`,broker,skipped:skipped.slice(0,10)});
     const paired = buildPositions(rawTrades,req.user.id,'csv',broker);
-
-    // Limit check for CSV import
-    const limit = req.planFlags?.tradeLimit || -1;
-    if (limit !== -1) {
-      const count = await Trade.count({ where: { userId: req.user.id } });
-      if (count + paired.length > limit) {
-        return res.status(403).json({ message: `CSV import exceeds your plan's trade limit (${limit}). Upgrade for more.` });
-      }
-    }
 
     const brokerIds = paired.filter(t => t.brokerId).map(t => t.brokerId);
     const existing = brokerIds.length > 0
@@ -318,7 +294,7 @@ router.post('/import/csv', planGate('csvImport'), upload.single('file'), async (
   } catch(err){res.status(400).json({message:'CSV import failed: '+err.message});}
 });
 
-router.post('/import/broker', planGate('brokerSync'), async (req, res) => {
+router.post('/import/broker', async (req, res) => {
   const { broker, clientId, accessToken, fromDate, toDate } = req.body;
   if (!accessToken) return res.status(400).json({ message: 'Access token is required.' });
   if (!clientId)    return res.status(400).json({ message: 'Client ID is required.' });
@@ -369,23 +345,12 @@ router.post('/import/broker', planGate('brokerSync'), async (req, res) => {
     const tradeType  = t.transactionType==='BUY' ? 'BUY' : 'SELL';
     const entryPrice = parseFloat(t.tradedPrice) || 0;
     const quantity   = parseInt(t.tradedQuantity) || 1;
-    // Auto-calculate charges using verified Zerodha F&O rates — ignore Dhan's reported charges
     const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange).total;
     return { symbol:sym, underlying:underlying.toUpperCase(), tradeType, optionType, exchange, strikePrice:parseFloat(t.drvStrikePrice)||0, expiryDate:t.drvExpiryDate&&t.drvExpiryDate!=='NA'?new Date(t.drvExpiryDate):new Date(), lotSize:1, quantity, entryPrice, entryDate:new Date(t.exchangeTime||t.createTime||Date.now()), brokerId:t.exchangeTradeId||t.orderId||'', charges };
   });
 
   try {
     const paired   = buildPositions(rawTrades, req.user.id, 'broker_api', 'dhan');
-
-    // Limit check for broker import
-    const limit = req.planFlags?.tradeLimit || -1;
-    if (limit !== -1) {
-      const count = await Trade.count({ where: { userId: req.user.id } });
-      if (count + paired.length > limit) {
-        return res.status(403).json({ message: `Broker sync exceeds your plan's trade limit (${limit}). Upgrade for more.` });
-      }
-    }
-
     const inserted = await Trade.bulkCreate(paired);
     res.json({ message:`${inserted.length} trades synced from Dhan.`, count:inserted.length, closed:paired.filter(t=>t.status==='CLOSED'||t.status==='EXPIRED').length, open:paired.filter(t=>t.status==='OPEN').length, tradeIds:inserted.map(t=>({id:t.id,symbol:t.symbol,entryDate:t.entryDate})) });
   } catch(err) {
@@ -393,8 +358,7 @@ router.post('/import/broker', planGate('brokerSync'), async (req, res) => {
   }
 });
 
-// ── POST /api/trades/import/fyers ─────────────────────────────────────────────
-router.post('/import/fyers', planGate('brokerSync'), async (req, res) => {
+router.post('/import/fyers', async (req, res) => {
   const { appId, accessToken, fromDate, toDate } = req.body;
   if (!accessToken) return res.status(400).json({ message: 'Access token is required.' });
   if (!appId)       return res.status(400).json({ message: 'App ID is required.' });
@@ -517,16 +481,6 @@ router.post('/import/fyers', planGate('brokerSync'), async (req, res) => {
 
   try {
     const paired   = buildPositions(rawTrades, req.user.id, 'broker_api', 'fyers');
-
-    // Limit check for Fyers import
-    const limit = req.planFlags?.tradeLimit || -1;
-    if (limit !== -1) {
-      const count = await Trade.count({ where: { userId: req.user.id } });
-      if (count + paired.length > limit) {
-        return res.status(403).json({ message: `Fyers sync exceeds your plan's trade limit (${limit}). Upgrade for more.` });
-      }
-    }
-
     const inserted = await Trade.bulkCreate(paired);
     res.json({
       message: `${inserted.length} trades synced from Fyers.`,

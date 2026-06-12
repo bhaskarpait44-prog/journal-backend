@@ -71,15 +71,6 @@ User.init({
       maxDailyLoss: 2
     }
   },
-  subscription: {
-    type: DataTypes.JSONB,
-    defaultValue: {
-      plan: 'none',
-      status: 'none',
-      expiry: null,
-      startedAt: null
-    }
-  },
   sessions: {
     type: DataTypes.JSONB,
     defaultValue: []

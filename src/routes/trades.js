@@ -10,6 +10,66 @@ const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 router.use(protect);
 
+router.get('/tags/popular', async (req, res) => {
+  try {
+    const trades = await Trade.findAll({
+      where: { userId: req.user.id },
+      attributes: ['tags'],
+      raw: true
+    });
+    
+    const tagCount = {};
+    trades.forEach(t => {
+      const tags = Array.isArray(t.tags) ? t.tags : [];
+      tags.forEach(tag => {
+        const normalized = tag.toLowerCase().trim();
+        if (normalized) {
+          tagCount[normalized] = (tagCount[normalized] || 0) + 1;
+        }
+      });
+    });
+
+    const popular = Object.entries(tagCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([tag]) => tag);
+
+    res.json(popular);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.get('/latest', async (req, res) => {
+  try {
+    const trade = await Trade.findOne({
+      where: { userId: req.user.id },
+      order: [['createdAt', 'DESC']]
+    });
+    res.json(trade);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.post('/estimate-charges', async (req, res) => {
+  try {
+    const { entryPrice, exitPrice, lotSize, quantity, tradeType, exchange, status } = req.body;
+    const charges = calcCharges(
+      parseFloat(entryPrice) || 0,
+      parseFloat(exitPrice) || 0,
+      parseInt(lotSize) || 0,
+      parseInt(quantity) || 0,
+      tradeType,
+      exchange || 'NSE',
+      status || 'OPEN'
+    );
+    res.json(charges);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
 function buildPositions(rawTrades, userId, source, brokerName) {
   const paired = [], buyPool = {}, sellPool = {};
   

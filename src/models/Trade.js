@@ -184,9 +184,12 @@ Trade.init({
             ? trade.stopLoss && exit <= trade.stopLoss
             : trade.stopLoss && exit >= trade.stopLoss;
           
-          trade.exitReason = exitHitTarget ? 'TARGET_HIT'
-                           : exitHitSL    ? 'STOPLOSS_HIT'
-                           : 'MANUAL_EXIT';
+          // Only auto-assign exitReason if not already set manually
+          if (!trade.exitReason) {
+            trade.exitReason = exitHitTarget ? 'TARGET_HIT'
+                             : exitHitSL    ? 'STOPLOSS_HIT'
+                             : 'MANUAL_EXIT';
+          }
         }
       }
     }

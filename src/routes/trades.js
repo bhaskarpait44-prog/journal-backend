@@ -13,8 +13,15 @@ router.use(protect);
 
 function buildPositions(rawTrades, userId, source, brokerName) {
   const paired = [], buyPool = {}, sellPool = {};
-  rawTrades.sort((a, b) => new Date(a.entryDate) - new Date(b.entryDate));
-  for (const t of rawTrades) {
+  
+  // Separate already closed trades (e.g. from Dhan P&L or Broker API) from those that need FIFO pairing
+  const alreadyClosed = rawTrades.filter(t => t.status === 'CLOSED' || t.status === 'EXPIRED');
+  const needsPairing  = rawTrades.filter(t => t.status !== 'CLOSED' && t.status !== 'EXPIRED');
+  
+  paired.push(...alreadyClosed);
+  
+  needsPairing.sort((a, b) => new Date(a.entryDate) - new Date(b.entryDate));
+  for (const t of needsPairing) {
     const key = (t.symbol || '').toUpperCase();
     if (t.tradeType === 'BUY') {
       if (sellPool[key]?.length) {
@@ -66,7 +73,7 @@ router.get('/', async (req, res) => {
   try {
     const { status, symbol, underlying, from, to, optionType, page=1, limit=50 } = req.query;
     const where = { userId: req.user.id };
-    if (status)     where.status     = status;
+    if (status)     where.status     = status.toUpperCase();
     if (optionType) where.optionType = optionType;
     if (symbol)     where.symbol     = { [Op.iLike]: `%${symbol}%` };
     if (underlying) where.underlying = { [Op.iLike]: underlying };

@@ -97,6 +97,13 @@ function extractUnderlying(sym) {
   if (!sym) return '';
   const s = sym.toUpperCase().trim();
   const withoutExch = s.replace(/^(NSE|BSE|NFO|MCX|BFO)[:_]/, '');
+
+  // Handle "OPT NIFTY 12 May 2026 23750 PE" format
+  if (withoutExch.startsWith('OPT ')) {
+    const parts = withoutExch.split(/\s+/);
+    if (parts.length > 1) return parts[1];
+  }
+
   const m1 = withoutExch.match(/^([A-Z]+)\d{2}[A-Z]{3}\d+(CE|PE)$/i);
   if (m1) return m1[1];
   const m2 = withoutExch.match(/^([A-Z]+)\d{6,}(CE|PE)$/i);
@@ -145,7 +152,7 @@ function detectBroker(headers) {
   const any = (...keys) => keys.some(k => h.some(x => x.includes(norm(k))));
 
   if (any('tradingsymbol') && any('trade_date','order_execution_time') && any('trade_type')) return BROKER_NAMES.ZERODHA;
-  if (any('security_name') && (any('buy_avg','avg_buy_price','buy_average') || any('realized_profit','realised_profit'))) return BROKER_NAMES.DHAN_PNL;
+  if ((any('security_name') || any('scrip_name')) && (any('buy_avg','avg_buy_price','buy_average') || any('realized_profit','realised_profit', 'realised_p_l'))) return BROKER_NAMES.DHAN_PNL;
   if (any('exchange_segment') && any('tradingsymbol') && any('transaction_type')) return BROKER_NAMES.DHAN;
   if (any('security_id') && any('transaction_type') && any('quantity')) return BROKER_NAMES.DHAN;
   if (any('instrument_name','scrip_name') && any('transaction_type') && any('trade_date','trade_time')) return BROKER_NAMES.UPSTOX;
@@ -284,16 +291,26 @@ function normalizeDhan(row) {
 
 function normalizeDhanPnl(row) {
   const sym     = pick(row, 'security_name', 'scrip_name', 'symbol', 'tradingsymbol', 'instrument');
-  const buyQty  = safeInt(pick(row, 'buy_qty', 'buy_quantity', 'quantity'));
+  if (!sym || sym.toLowerCase().includes('net p&l')) return { symbol: null };
+
+  const buyQty  = safeInt(pick(row, 'buy_qty', 'buy_quantity'));
   const sellQty = safeInt(pick(row, 'sell_qty', 'sell_quantity'));
-  const qty     = buyQty || sellQty || 1;
+  const qty     = buyQty || sellQty || safeInt(pick(row, 'quantity'));
+
   const buyAvg  = safeFloat(pick(row, 'buy_avg', 'avg_buy_price', 'buy_average', 'buy_price'));
   const sellAvg = safeFloat(pick(row, 'sell_avg', 'avg_sell_price', 'sell_average', 'sell_price'));
-  const pnl     = safeFloat(pick(row, 'realized_profit', 'realised_profit', 'net_profit', 'profit_loss'));
-  const date    = parseDate(pick(row, 'trade_date', 'date', 'settlement_date', 'close_date', 'order_date'));
-  const tradeType  = buyQty >= sellQty ? 'BUY' : 'SELL';
-  const entryPrice = tradeType === 'BUY' ? buyAvg : sellAvg;
-  const exitPrice  = tradeType === 'BUY' ? sellAvg : buyAvg;
+
+  const pnl     = safeFloat(pick(row, 'realized_profit', 'realised_profit', 'realised_p_l', 'net_profit', 'profit_loss'));
+
+  let date      = parseDate(pick(row, 'trade_date', 'date', 'settlement_date', 'close_date', 'order_date'));
+  if (!date || isNaN(date.getTime())) {
+    date = inferExpiryFromSymbol(sym) || new Date();
+  }
+
+  const tradeType  = buyAvg > 0 ? 'BUY' : 'SELL';
+  const entryPrice = buyAvg || sellAvg;
+  const exitPrice  = sellAvg || buyAvg;
+
   return { symbol: sym, tradeType, quantity: qty, entryPrice, exitPrice,
     entryDate: date, exitDate: date, status: 'CLOSED', pnl, netPnl: pnl,
     underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),

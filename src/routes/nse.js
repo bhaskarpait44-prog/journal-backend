@@ -3,6 +3,42 @@ import axios from 'axios';
 
 const router = express.Router();
 
+// ── Session Management ─────────────────────────────────────────────────────
+let nseSession = { cookies: '', ts: 0 };
+const SESSION_TTL = 15 * 60 * 1000; // 15-minute session reuse
+
+async function getNSESession() {
+  if (nseSession.cookies && Date.now() - nseSession.ts < SESSION_TTL) {
+    return nseSession.cookies;
+  }
+
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+  };
+
+  try {
+    // 1. Establish session via main page
+    const homeRes = await axios.get('https://www.nseindia.com', { headers, timeout: 5000 });
+    const cookies = homeRes.headers['set-cookie']?.map(c => c.split(';')[0]).join('; ') || '';
+    
+    // 2. Visit a landing page to mature the session
+    await axios.get('https://www.nseindia.com/market-data/option-chain', {
+      timeout: 5000,
+      headers: { ...headers, 'Cookie': cookies, 'Referer': 'https://www.nseindia.com' },
+    });
+
+    nseSession = { cookies, ts: Date.now() };
+    return cookies;
+  } catch (err) {
+    console.warn('[NSE] Failed to establish session:', err.message);
+    return '';
+  }
+}
+
 // ── 6-hour in-memory cache ─────────────────────────────────────────────────
 const CACHE_TTL = 6 * 60 * 60 * 1000;
 let cache = { symbols: null, ts: 0 };
@@ -189,28 +225,17 @@ router.get('/fno-symbols', async (req, res) => {
   if (shouldTry) {
     try {
       console.log('[NSE] Fetching live F&O symbols...');
+      const cookies = await getNSESession();
 
-      // Step 1: establish session cookie via homepage
-      const homeRes = await axios.get('https://www.nseindia.com', {
-        timeout: 4000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-        },
-      });
-      const cookies = homeRes.headers['set-cookie']?.map(c => c.split(';')[0]).join('; ') || '';
-
-      // Step 2: visit derivatives page
-      await axios.get('https://www.nseindia.com/market-data/equity-derivatives-watch', {
-        timeout: 3000,
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies, 'Referer': 'https://www.nseindia.com' },
-      });
-
-      // Step 3: fetch F&O master CSV
+      // fetch F&O master CSV
       const csvRes = await axios.get('https://www.nseindia.com/api/master-quote', {
         timeout: 4000,
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies, 'Referer': 'https://www.nseindia.com/market-data/equity-derivatives-watch', 'Accept': 'application/json' },
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+          'Cookie': cookies, 
+          'Referer': 'https://www.nseindia.com/market-data/equity-derivatives-watch', 
+          'Accept': 'application/json' 
+        },
       });
 
       const items = Array.isArray(csvRes.data) ? csvRes.data : (csvRes.data?.data || []);
@@ -247,20 +272,10 @@ router.get('/market-snapshot', async (req, res) => {
 
   try {
     console.log('[NSE] Fetching market snapshot...');
-
-    // Establish NSE session cookie first
-    const homeRes = await axios.get('https://www.nseindia.com', {
-      timeout: 4000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    });
-    const cookies = homeRes.headers['set-cookie']?.map(c => c.split(';')[0]).join('; ') || '';
+    const cookies = await getNSESession();
 
     const NSE_HEADERS = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
       'Accept': 'application/json',
       'Referer': 'https://www.nseindia.com',
       'Cookie': cookies,
@@ -353,42 +368,32 @@ router.get('/expiry-dates/:symbol', async (req, res) => {
     return res.json({ expiryDates: cached.dates, source: 'cache' });
   }
 
+  // Quick cooldown for failed symbols to avoid hammering NSE while typing
+  if (cached && cached.failed && Date.now() - cached.ts < 30000) {
+     return res.status(503).json({ message: 'NSE fetch cooling down', error: 'RECENT_FAIL' });
+  }
+
   try {
     const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(symbol);
     const baseUrl = isIndex 
       ? 'https://www.nseindia.com/api/option-chain-indices' 
       : 'https://www.nseindia.com/api/option-chain-equities';
 
+    const cookies = await getNSESession();
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
       'Accept': '*/*',
       'Accept-Language': 'en-US,en;q=0.9',
       'Accept-Encoding': 'gzip, deflate, br',
       'Connection': 'keep-alive',
+      'Cookie': cookies,
+      'Referer': 'https://www.nseindia.com/market-data/option-chain',
     };
 
-    // 1. Establish session via main page
-    const homeRes = await axios.get('https://www.nseindia.com', { headers, timeout: 5000 });
-    const cookies = homeRes.headers['set-cookie']?.map(c => c.split(';')[0]).join('; ') || '';
-
-    // 2. Visit the option chain landing page to mature the session
-    await axios.get('https://www.nseindia.com/market-data/option-chain', {
-      timeout: 5000,
-      headers: {
-        ...headers,
-        'Cookie': cookies,
-        'Referer': 'https://www.nseindia.com',
-      },
-    });
-
-    // 3. Fetch option chain
+    // Fetch option chain
     const ocRes = await axios.get(`${baseUrl}?symbol=${encodeURIComponent(symbol)}`, {
       timeout: 5000,
-      headers: {
-        ...headers,
-        'Cookie': cookies,
-        'Referer': 'https://www.nseindia.com/market-data/option-chain',
-      },
+      headers
     });
 
     const expiryDates = ocRes.data?.records?.expiryDates || [];
@@ -401,7 +406,10 @@ router.get('/expiry-dates/:symbol', async (req, res) => {
     throw new Error(`No expiry dates found in NSE response for ${symbol}`);
   } catch (err) {
     console.error(`[NSE] Expiry fetch failed for ${symbol}:`, err.message);
-    // If it's a 401/403/404 from NSE, it might be an invalid symbol for options
+    
+    // Cache the failure briefly
+    expiryCache.set(symbol, { dates: [], ts: Date.now(), failed: true });
+
     const status = err.response?.status || 500;
     res.status(status === 404 ? 404 : 503).json({ 
       message: `Failed to fetch expiry dates for ${symbol}`, 

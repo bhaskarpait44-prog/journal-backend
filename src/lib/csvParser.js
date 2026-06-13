@@ -70,7 +70,7 @@ function safeInt(v) {
 }
 
 function extractOptionType(sym) {
-  if (!sym) return '';
+  if (!sym) return 'XX';
   const s = sym.toUpperCase().trim();
   if (s.endsWith('CE') || s.endsWith(' CE')) return 'CE';
   if (s.endsWith('PE') || s.endsWith(' PE')) return 'PE';
@@ -81,7 +81,18 @@ function extractOptionType(sym) {
     if (p === 'CE') return 'CE';
     if (p === 'PE') return 'PE';
   }
-  return '';
+  return 'XX';
+}
+
+function detectInstrumentType(sym) {
+  if (!sym) return 'EQUITY';
+  const s = sym.toUpperCase().trim();
+  if (s.includes('CE') || s.includes('PE') || s.includes('CALL') || s.includes('PUT')) return 'OPTIONS';
+  if (s.includes('FUT')) return 'FUTURES';
+  // Check for common option/future symbol patterns like NIFTY26MAY23750CE
+  if (/[A-Z]+\d{2}[A-Z]{3}\d+(CE|PE)/.test(s)) return 'OPTIONS';
+  if (/[A-Z]+\d{2}[A-Z]{3}FUT/.test(s)) return 'FUTURES';
+  return 'EQUITY';
 }
 
 function extractStrike(sym) {
@@ -423,8 +434,8 @@ export function parseCSVBuffer(buffer, userId) {
       if (!t.entryDate || isNaN(new Date(t.entryDate))) { skipped.push({ row: i+2, reason: 'Invalid date', symbol: t.symbol }); continue; }
       if (!t.entryPrice || t.entryPrice === 0) { skipped.push({ row: i+2, reason: 'Zero price', symbol: t.symbol }); continue; }
 
-      const optionType = t.optionType || extractOptionType(t.symbol);
-      if (!optionType) { skipped.push({ row: i+2, reason: 'Not an options trade (CE/PE/CALL/PUT not found)', symbol: t.symbol }); continue; }
+      const instrumentType = detectInstrumentType(t.symbol);
+      const optionType     = instrumentType === 'OPTIONS' ? extractOptionType(t.symbol) : 'XX';
 
       const exchange   = t.exchange || 'NSE';
       const lotSize    = t.lotSize  || 1;
@@ -446,9 +457,10 @@ export function parseCSVBuffer(buffer, userId) {
         symbol:      t.symbol,
         underlying:  (t.underlying || extractUnderlying(t.symbol) || t.symbol).toUpperCase(),
         tradeType,
+        instrumentType,
         optionType,
-        strikePrice: t.strikePrice || extractStrike(t.symbol),
-        expiryDate:  t.expiryDate || inferExpiryFromSymbol(t.symbol) || new Date(),
+        strikePrice: instrumentType === 'OPTIONS' ? (t.strikePrice || extractStrike(t.symbol)) : null,
+        expiryDate:  instrumentType !== 'EQUITY' ? (t.expiryDate || inferExpiryFromSymbol(t.symbol) || new Date()) : null,
         lotSize,
         quantity:    qty,
         entryPrice,

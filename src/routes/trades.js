@@ -390,23 +390,47 @@ router.post('/import/broker', async (req, res) => {
     return res.status(400).json({ message: userMsg, details: d });
   }
 
-  const fnoRows = dhanRows.filter(t =>
-    ['NSE_FNO','BSE_FNO','NSE_FO','BSE_FO'].includes(t.exchangeSegment) ||
-    (t.drvOptionType && t.drvOptionType !== 'NA' && t.drvOptionType !== '')
-  );
-  if (!fnoRows.length && dhanRows.length > 0) return res.status(400).json({ message: `Found ${dhanRows.length} trades but none are F&O options.` });
-  if (!fnoRows.length) return res.status(400).json({ message: 'No trades found in this date range. Try a wider range.' });
+  const allRows = dhanRows;
+  if (!allRows.length) return res.status(400).json({ message: 'No trades found in this date range. Try a wider range.' });
 
-  const rawTrades = fnoRows.map(t => {
+  const rawTrades = allRows.map(t => {
     const sym        = (t.customSymbol || t.tradingSymbol || '').toUpperCase();
-    const optionType = t.drvOptionType==='CALL'?'CE':t.drvOptionType==='PUT'?'PE':sym.endsWith('CE')?'CE':'PE';
+    let instrumentType = 'EQUITY';
+    if (['NSE_FNO','BSE_FNO','NSE_FO','BSE_FO'].includes(t.exchangeSegment)) {
+      instrumentType = (t.drvOptionType && t.drvOptionType !== 'NA' && t.drvOptionType !== '') ? 'OPTIONS' : 'FUTURES';
+    } else if (sym.includes('CE') || sym.includes('PE')) {
+      instrumentType = 'OPTIONS';
+    } else if (sym.includes('FUT')) {
+      instrumentType = 'FUTURES';
+    }
+
+    const optionType = instrumentType === 'OPTIONS' 
+      ? (t.drvOptionType === 'CALL' ? 'CE' : t.drvOptionType === 'PUT' ? 'PE' : (sym.endsWith('PE') ? 'PE' : 'CE'))
+      : 'XX';
+
     const underlying = sym.replace(/\d{2}[A-Z]{3}\d{2,4}(CE|PE)$/i,'').replace(/\d+.*$/,'').replace(/[-_]/g,'')||'UNKNOWN';
     const exchange   = (t.exchangeSegment||'').startsWith('BSE') ? 'BSE' : 'NSE';
     const tradeType  = t.transactionType==='BUY' ? 'BUY' : 'SELL';
     const entryPrice = parseFloat(t.tradedPrice) || 0;
     const quantity   = parseInt(t.tradedQuantity) || 1;
     const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange).total;
-    return { symbol:sym, underlying:underlying.toUpperCase(), tradeType, optionType, exchange, strikePrice:parseFloat(t.drvStrikePrice)||0, expiryDate:t.drvExpiryDate&&t.drvExpiryDate!=='NA'?new Date(t.drvExpiryDate):new Date(), lotSize:1, quantity, entryPrice, entryDate:new Date(t.exchangeTime||t.createTime||Date.now()), brokerId:t.exchangeTradeId||t.orderId||'', charges };
+    
+    return { 
+      symbol: sym, 
+      underlying: underlying.toUpperCase(), 
+      tradeType, 
+      instrumentType,
+      optionType, 
+      exchange, 
+      strikePrice: parseFloat(t.drvStrikePrice) || null, 
+      expiryDate: t.drvExpiryDate && t.drvExpiryDate !== 'NA' ? new Date(t.drvExpiryDate) : (instrumentType === 'EQUITY' ? null : new Date()), 
+      lotSize: 1, 
+      quantity, 
+      entryPrice, 
+      entryDate: new Date(t.exchangeTime || t.createTime || Date.now()), 
+      brokerId: t.exchangeTradeId || t.orderId || '', 
+      charges 
+    };
   });
 
   try {
@@ -502,40 +526,57 @@ router.post('/import/fyers', async (req, res) => {
     });
   }
 
-  const fnoRows = fyersRows.filter(t => {
-    const sym = (t.symbol || t.tradingSymbol || '').toUpperCase();
-    return sym.includes(':') && (sym.endsWith('CE') || sym.endsWith('PE'))
-        || (!sym.includes(':') && (sym.endsWith('CE') || sym.endsWith('PE')));
-  });
-
-  if (!fnoRows.length && fyersRows.length > 0)
-    return res.status(400).json({ message: `Found ${fyersRows.length} trades but none are F&O options.` });
-  if (!fnoRows.length)
+  const allRows = fyersRows;
+  if (!allRows.length)
     return res.status(400).json({ message: 'No trades found in this date range. Try a wider range.' });
 
-  const rawTrades = fnoRows.map(t => {
+  const rawTrades = allRows.map(t => {
     const fullSym    = (t.symbol || t.tradingSymbol || '').toUpperCase();
     const sym        = fullSym.includes(':') ? fullSym.split(':')[1] : fullSym;
     const exchange   = fullSym.startsWith('BSE') ? 'BSE' : 'NSE';
-    const optionType = sym.endsWith('CE') ? 'CE' : 'PE';
+    
+    let instrumentType = 'EQUITY';
+    if (sym.endsWith('CE') || sym.endsWith('PE')) instrumentType = 'OPTIONS';
+    else if (sym.endsWith('FUT')) instrumentType = 'FUTURES';
+
+    const optionType = instrumentType === 'OPTIONS' ? (sym.endsWith('CE') ? 'CE' : 'PE') : 'XX';
     const underlying = sym.replace(/\d{2}[A-Z]{3}\d{2,6}(CE|PE)$/i,'').replace(/\d+.*$/,'') || 'UNKNOWN';
+    
     const strikeMatch = sym.match(/(\d+)(CE|PE)$/i);
-    const strikePrice = strikeMatch ? parseFloat(strikeMatch[1]) : 0;
+    const strikePrice = instrumentType === 'OPTIONS' && strikeMatch ? parseFloat(strikeMatch[1]) : null;
+    
     const expMatch = sym.match(/(\d{2})([A-Z]{3})(\d{2,4})/i);
-    let expiryDate = new Date();
-    if (expMatch) {
-      const yr  = expMatch[3].length === 2 ? '20' + expMatch[3] : expMatch[3];
-      expiryDate = new Date(`${expMatch[1]} ${expMatch[2]} ${yr}`);
+    let expiryDate = null;
+    if (instrumentType !== 'EQUITY') {
+      if (expMatch) {
+        const yr  = expMatch[3].length === 2 ? '20' + expMatch[3] : expMatch[3];
+        expiryDate = new Date(`${expMatch[1]} ${expMatch[2]} ${yr}`);
+      } else {
+        expiryDate = new Date();
+      }
     }
+
     const tradeType  = (t.side === 1 || t.side === 'BUY'  || t.transactionType === 'BUY')  ? 'BUY' : 'SELL';
     const entryPrice = parseFloat(t.tradePrice || t.tradedPrice || t.rate || 0);
     const quantity   = parseInt(t.tradedQty || t.qty || t.quantity || 1);
     const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange).total;
     const entryDate  = new Date(t.orderDateTime || t.tradeDate || Date.now());
+
     return {
-      symbol: sym, underlying: underlying.toUpperCase(), tradeType, optionType, exchange,
-      strikePrice, expiryDate, lotSize: 1, quantity, entryPrice, entryDate,
-      brokerId: t.tradeId || t.orderId || '', charges,
+      symbol: sym, 
+      underlying: underlying.toUpperCase(), 
+      tradeType, 
+      instrumentType,
+      optionType, 
+      exchange,
+      strikePrice, 
+      expiryDate, 
+      lotSize: 1, 
+      quantity, 
+      entryPrice, 
+      entryDate,
+      brokerId: t.tradeId || t.orderId || '', 
+      charges,
     };
   });
 

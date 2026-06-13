@@ -26,21 +26,25 @@ Trade.init({
     type: DataTypes.STRING,
     allowNull: false
   },
+  instrumentType: {
+    type: DataTypes.ENUM('EQUITY', 'FUTURES', 'OPTIONS'),
+    defaultValue: 'OPTIONS'
+  },
   tradeType: {
     type: DataTypes.ENUM('BUY', 'SELL'),
     allowNull: false
   },
   optionType: {
-    type: DataTypes.ENUM('CE', 'PE'),
-    allowNull: false
+    type: DataTypes.ENUM('CE', 'PE', 'XX'),
+    allowNull: true
   },
   strikePrice: {
     type: DataTypes.FLOAT,
-    allowNull: false
+    allowNull: true
   },
   expiryDate: {
     type: DataTypes.DATE,
-    allowNull: false
+    allowNull: true
   },
   lotSize: {
     type: DataTypes.INTEGER,

@@ -26,14 +26,22 @@ const PORT = process.env.PORT || 5000;
 
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:4173',
   'https://tradelog-journal.vercel.app',
-  'https://trade-log.io'
-];
+  'https://trade-log.io',
+  process.env.CLIENT_URL
+].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) callback(null, true);
-    else callback(new Error('Not allowed by CORS'));
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.error('CORS Error: Origin not allowed:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
   },
   credentials: true,
 }));

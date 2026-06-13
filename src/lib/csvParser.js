@@ -444,10 +444,18 @@ export function parseCSVBuffer(buffer, userId) {
       const entryPrice = t.entryPrice;
       const exitPrice  = t.exitPrice && t.exitPrice > 0 ? t.exitPrice : null;
 
-      // Always auto-calculate Zerodha F&O Options charges — ignore any CSV charge columns
-      const charges = exitPrice
-        ? calcCharges(entryPrice, exitPrice, lotSize, qty, tradeType, exchange).total
-        : calcCharges(entryPrice, 0, lotSize, qty, tradeType, exchange).total;
+      // Always auto-calculate Zerodha charges — ignore any CSV charge columns
+      const status = t.status || (exitPrice ? 'CLOSED' : 'OPEN');
+      const charges = calcCharges(
+        entryPrice, 
+        exitPrice || 0, 
+        lotSize, 
+        qty, 
+        tradeType, 
+        exchange, 
+        status, 
+        instrumentType
+      ).total;
 
       const tradeDoc = {
         userId,

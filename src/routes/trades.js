@@ -54,7 +54,7 @@ router.get('/latest', async (req, res) => {
 
 router.post('/estimate-charges', async (req, res) => {
   try {
-    const { entryPrice, exitPrice, lotSize, quantity, tradeType, exchange, status } = req.body;
+    const { entryPrice, exitPrice, lotSize, quantity, tradeType, exchange, status, instrumentType } = req.body;
     const charges = calcCharges(
       parseFloat(entryPrice) || 0,
       parseFloat(exitPrice) || 0,
@@ -62,7 +62,8 @@ router.post('/estimate-charges', async (req, res) => {
       parseInt(quantity) || 0,
       tradeType,
       exchange || 'NSE',
-      status || 'OPEN'
+      status || 'OPEN',
+      instrumentType || 'OPTIONS'
     );
     res.json(charges);
   } catch (err) {
@@ -166,6 +167,9 @@ router.post('/', async (req, res) => {
     const body     = { ...req.body, userId: req.user.id, source: 'manual' };
     const exchange = body.exchange || 'NSE';
 
+    if (parseInt(body.quantity) <= 0) return res.status(400).json({ message: 'Quantity must be greater than 0' });
+    if (parseInt(body.lotSize) <= 0) return res.status(400).json({ message: 'Lot size must be greater than 0' });
+
     const today = new Date().toISOString().split('T')[0];
     const entryDateStr = new Date(body.entryDate).toISOString().split('T')[0];
     
@@ -183,11 +187,17 @@ router.post('/', async (req, res) => {
     }
 
     const isSettled = body.status === 'CLOSED' || body.status === 'EXPIRED';
-    if (isSettled) {
-      body.charges = calcCharges(body.entryPrice, body.exitPrice || 0, body.lotSize, body.quantity, body.tradeType, exchange, body.status).total;
-    } else {
-      body.charges = calcCharges(body.entryPrice, 0, body.lotSize, body.quantity, body.tradeType, exchange, body.status).total;
-    }
+    body.charges = calcCharges(
+      body.entryPrice, 
+      isSettled ? (body.exitPrice || 0) : 0, 
+      body.lotSize, 
+      body.quantity, 
+      body.tradeType, 
+      exchange, 
+      body.status,
+      body.instrumentType
+    ).total;
+
     const trade = await Trade.create(body);
     res.status(201).json({ trade });
   } catch(err) { res.status(400).json({ message: err.message }); }
@@ -221,7 +231,8 @@ router.put('/:id/close', async (req, res) => {
       trade.quantity,
       trade.tradeType,
       exchange,
-      'CLOSED'
+      'CLOSED',
+      trade.instrumentType
     ).total;
 
     await trade.update({
@@ -249,6 +260,10 @@ router.put('/:id', async (req, res) => {
     const type     = body.tradeType   || trade.tradeType;
     const status   = body.status      || trade.status;
     const psych    = body.psychology  || trade.psychology;
+    const instr    = body.instrumentType || trade.instrumentType;
+
+    if (qty <= 0) return res.status(400).json({ message: 'Quantity must be greater than 0' });
+    if (lotSize <= 0) return res.status(400).json({ message: 'Lot size must be greater than 0' });
 
     const entryDate = body.entryDate || trade.entryDate;
     const exitDate  = body.exitDate  || trade.exitDate;
@@ -269,11 +284,17 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    if (status === 'CLOSED' || status === 'EXPIRED') {
-      body.charges = calcCharges(entry, exit || 0, lotSize, qty, type, exchange, status).total;
-    } else {
-      body.charges = calcCharges(entry, 0, lotSize, qty, type, exchange, status).total;
-    }
+    const isSettled = status === 'CLOSED' || status === 'EXPIRED';
+    body.charges = calcCharges(
+      entry, 
+      isSettled ? (exit || 0) : 0, 
+      lotSize, 
+      qty, 
+      type, 
+      exchange, 
+      status,
+      instr
+    ).total;
 
     body.psychology = psych;
     
@@ -413,7 +434,7 @@ router.post('/import/broker', async (req, res) => {
     const tradeType  = t.transactionType==='BUY' ? 'BUY' : 'SELL';
     const entryPrice = parseFloat(t.tradedPrice) || 0;
     const quantity   = parseInt(t.tradedQuantity) || 1;
-    const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange).total;
+    const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange, 'OPEN', instrumentType).total;
     
     return { 
       symbol: sym, 
@@ -559,7 +580,7 @@ router.post('/import/fyers', async (req, res) => {
     const tradeType  = (t.side === 1 || t.side === 'BUY'  || t.transactionType === 'BUY')  ? 'BUY' : 'SELL';
     const entryPrice = parseFloat(t.tradePrice || t.tradedPrice || t.rate || 0);
     const quantity   = parseInt(t.tradedQty || t.qty || t.quantity || 1);
-    const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange).total;
+    const charges    = calcCharges(entryPrice, 0, 1, quantity, tradeType, exchange, 'OPEN', instrumentType).total;
     const entryDate  = new Date(t.orderDateTime || t.tradeDate || Date.now());
 
     return {

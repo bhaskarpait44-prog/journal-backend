@@ -45,14 +45,16 @@ let cache = { symbols: null, ts: 0 };
 let lastFail = 0;
 const FAIL_COOLDOWN = 30 * 60 * 1000; // only warn once per 30 min
 
-// ── Static fallback (Jan 2025 NSE F&O lot sizes) ──────────────────────────
+// ── Static fallback (June 2026 Market Lot Sizes) ──────────────────────────
 const STATIC_SYMBOLS = [
   { symbol: 'NIFTY',          lotSize: 65   },
   { symbol: 'BANKNIFTY',      lotSize: 30   },
-  { symbol: 'FINNIFTY',       lotSize: 65   },
+  { symbol: 'FINNIFTY',       lotSize: 60   },
   { symbol: 'MIDCPNIFTY',     lotSize: 120  },
+  { symbol: 'NIFTYNXT50',     lotSize: 25   },
   { symbol: 'SENSEX',         lotSize: 20   },
-  { symbol: 'BANKEX',         lotSize: 20   },
+  { symbol: 'BANKEX',         lotSize: 30   },
+  { symbol: 'SENSEX50',       lotSize: 60   },
   { symbol: 'RELIANCE',       lotSize: 250  },
   { symbol: 'TCS',            lotSize: 175  },
   { symbol: 'INFY',           lotSize: 400  },

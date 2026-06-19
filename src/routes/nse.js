@@ -219,18 +219,31 @@ router.get('/search', async (req, res) => {
   const q = req.query.q;
   if (!q || q.length < 2) return res.json({ symbols: [] });
 
+  const localQuery = q.toUpperCase();
+  const localList = cache.symbols || STATIC_SYMBOLS || [];
+  const localMatches = localList
+    .filter(s => s.symbol && s.symbol.toUpperCase().includes(localQuery))
+    .map(s => ({
+      symbol: s.symbol,
+      name: s.symbol,
+      exchange: ['SENSEX', 'BANKEX'].includes(s.symbol) ? 'BSE' : 'NSE',
+      type: ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX', 'SENSEX50'].includes(s.symbol) ? 'INDEX' : 'EQUITY',
+      lotSize: s.lotSize || 1
+    }));
+
   try {
     // Use Yahoo Finance autocomplete for a broader search (all stocks + indices)
     const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0&listsCount=0&crumb=123`;
     const response = await axios.get(url, {
+      timeout: 3000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
     });
 
     const quotes = response.data?.quotes || [];
-    const symbols = quotes
-      .filter(q => q.exchange === 'NSI' || q.exchange === 'BSE' || q.symbol.endsWith('.NS') || q.symbol.endsWith('.BO'))
+    const remoteMatches = quotes
+      .filter(q => q.exchange === 'NSI' || q.exchange === 'BSE' || (q.symbol && (q.symbol.endsWith('.NS') || q.symbol.endsWith('.BO'))))
       .map(q => {
         let symbol = q.symbol.replace('.NS', '').replace('.BO', '');
         // Special handling for Yahoo Finance index symbols
@@ -238,19 +251,40 @@ router.get('/search', async (req, res) => {
         if (symbol === '^NSEBANK') symbol = 'BANKNIFTY';
         if (symbol === '^BSESN') symbol = 'SENSEX';
         
+        const localFound = localList.find(s => s.symbol === symbol);
+        const lotSize = localFound ? localFound.lotSize : 1;
+
         return {
           symbol: symbol,
           name: q.shortname || q.longname || '',
           exchange: q.exchange === 'BSE' || q.symbol.endsWith('.BO') ? 'BSE' : 'NSE',
-          type: q.quoteType,
-          lotSize: 1 // Default lot size for equity
+          type: q.quoteType || 'EQUITY',
+          lotSize: lotSize
         };
       });
 
-    res.json({ symbols });
+    // Merge and de-duplicate (prioritize remote results for better descriptions)
+    const seen = new Set();
+    const merged = [];
+
+    for (const item of remoteMatches) {
+      if (!seen.has(item.symbol)) {
+        seen.add(item.symbol);
+        merged.push(item);
+      }
+    }
+
+    for (const item of localMatches) {
+      if (!seen.has(item.symbol)) {
+        seen.add(item.symbol);
+        merged.push(item);
+      }
+    }
+
+    res.json({ symbols: merged.slice(0, 15) });
   } catch (err) {
-    console.error('[NSE] Search failed:', err.message);
-    res.status(500).json({ message: 'Search failed' });
+    console.warn('[NSE] Yahoo Finance search failed, returning local matches:', err.message);
+    res.json({ symbols: localMatches.slice(0, 15), isFallback: true });
   }
 });
 
@@ -266,34 +300,72 @@ router.get('/fno-symbols', async (req, res) => {
 
   if (shouldTry) {
     try {
-      console.log('[NSE] Fetching live F&O symbols...');
-      const cookies = await getNSESession();
-
-      // fetch F&O master CSV
-      const csvRes = await axios.get('https://www.nseindia.com/api/master-quote', {
-        timeout: 4000,
+      console.log('[NSE] Fetching live F&O symbols from archives...');
+      const csvRes = await axios.get('https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv', {
+        timeout: 8000,
         headers: { 
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-          'Cookie': cookies, 
-          'Referer': 'https://www.nseindia.com/market-data/equity-derivatives-watch', 
-          'Accept': 'application/json' 
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         },
       });
 
-      const items = Array.isArray(csvRes.data) ? csvRes.data : (csvRes.data?.data || []);
-      if (items.length > 0) {
-        const symbols = items.map(item => ({
-          symbol:  (item.symbol || item.underlying || '').toUpperCase(),
-          lotSize: parseInt(item.marketLot || item.lotSize || item.lot_size || 1),
-        })).filter(s => s.symbol);
+      if (csvRes.data) {
+        const lines = csvRes.data.split(/\r?\n/);
+        if (lines.length > 1) {
+          const header = lines[0].split(',').map(h => h.trim().toUpperCase());
+          
+          // Determine the target column for current month-year lot size (e.g. "JUN-26")
+          const dateObj = new Date();
+          const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+          const currentMonthName = months[dateObj.getMonth()];
+          const currentYearTwoDigits = dateObj.getFullYear().toString().slice(-2);
+          const currentMonthCol = `${currentMonthName}-${currentYearTwoDigits}`; // e.g. "JUN-26"
+          
+          let lotSizeColIdx = header.findIndex(h => h.includes(currentMonthCol));
+          if (lotSizeColIdx === -1) {
+            lotSizeColIdx = header.findIndex(h => h.includes('JUN-26'));
+          }
+          if (lotSizeColIdx === -1) {
+            // Find any column that looks like MMM-YY
+            lotSizeColIdx = header.findIndex(h => /^[A-Z]{3}-\d{2}$/.test(h));
+          }
+          if (lotSizeColIdx === -1) {
+            lotSizeColIdx = 2; // Default to index 2 (usually the first expiry column)
+          }
 
-        cache = { symbols, ts: Date.now() };
-        res.setHeader('Cache-Control', 'public, max-age=21600'); // 6 hours
-        return res.json({ symbols, source: 'nse_live', count: symbols.length });
+          const symbolColIdx = header.findIndex(h => h.includes('SYMBOL'));
+          const finalSymbolColIdx = symbolColIdx !== -1 ? symbolColIdx : 1;
+
+          const symbols = [];
+          for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            const cols = line.split(',').map(c => c.trim());
+            if (cols.length > Math.max(finalSymbolColIdx, lotSizeColIdx)) {
+              const sym = cols[finalSymbolColIdx];
+              const lotVal = cols[lotSizeColIdx];
+              if (sym && lotVal) {
+                const lotSize = parseInt(lotVal);
+                if (!isNaN(lotSize) && lotSize > 0) {
+                  symbols.push({
+                    symbol: sym.toUpperCase(),
+                    lotSize: lotSize
+                  });
+                }
+              }
+            }
+          }
+
+          if (symbols.length > 0) {
+            cache = { symbols, ts: Date.now() };
+            res.setHeader('Cache-Control', 'public, max-age=21600'); // 6 hours
+            return res.json({ symbols, source: 'nse_live', count: symbols.length });
+          }
+        }
       }
     } catch (err) {
       lastFail = Date.now();
-      console.warn(`[NSE] Live fetch failed — using static fallback. (${err.message})`);
+      console.warn(`[NSE] Live fetch from archives failed — using static fallback. (${err.message})`);
     }
   }
 

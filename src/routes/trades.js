@@ -44,7 +44,7 @@ router.get('/latest', async (req, res) => {
   try {
     const trade = await Trade.findOne({
       where: { userId: req.user.id },
-      order: [['createdAt', 'DESC']]
+      order: [['entryDate', 'DESC']]
     });
     res.json(trade);
   } catch (err) {
@@ -341,6 +341,26 @@ router.get('/:id/psychology', async (req, res) => {
     if(!trade) return res.status(404).json({message:'Trade not found.'});
     res.json({psychology:trade.psychology||{},symbol:trade.symbol,entryDate:trade.entryDate});
   } catch(err){res.status(500).json({message:err.message});}
+});
+
+// #11: Save chart screenshot (base64 data URL)
+router.post('/:id/screenshot', async (req, res) => {
+  try {
+    const { screenshot } = req.body;
+    if (!screenshot) return res.status(400).json({ message: 'No screenshot provided.' });
+    // Basic validation — must be a data URL
+    if (!screenshot.startsWith('data:image/')) {
+      return res.status(400).json({ message: 'Invalid image format.' });
+    }
+    // Guard against excessively large images (>5MB base64 ≈ ~3.75MB decoded)
+    if (screenshot.length > 6 * 1024 * 1024) {
+      return res.status(400).json({ message: 'Screenshot exceeds 5MB limit.' });
+    }
+    const trade = await Trade.findOne({ where: { id: req.params.id, userId: req.user.id } });
+    if (!trade) return res.status(404).json({ message: 'Trade not found.' });
+    await trade.update({ screenshot });
+    res.json({ message: 'Screenshot saved.', tradeId: trade.id });
+  } catch(err) { res.status(400).json({ message: err.message }); }
 });
 
 router.post('/import/csv', upload.single('file'), async (req, res) => {

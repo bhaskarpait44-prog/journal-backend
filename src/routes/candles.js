@@ -15,6 +15,9 @@ const TICKER_MAP = {
   'BANKNIFTY': '^NSEBANK',
   'FINNIFTY': 'NIFTY_FIN_SERVICE.NS',
   'MIDCPNIFTY': '^NSEMDCP50',
+  'NIFTYNXT50': '^NSENX50',
+  'SENSEX': '^BSESN',
+  'BANKEX': '^BSEBK',
 };
 
 function aggregateCandles(candles, minutes) {

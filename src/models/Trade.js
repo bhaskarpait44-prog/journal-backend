@@ -152,7 +152,15 @@ Trade.init({
     }
   },
   exitReason: {
-    type: DataTypes.ENUM('TARGET_HIT', 'STOPLOSS_HIT', 'MANUAL_EXIT'),
+    type: DataTypes.ENUM(
+      'TARGET_HIT', 'STOPLOSS_HIT', 'MANUAL_EXIT',
+      'TRAILING_STOP', 'PARTIAL_PROFIT', 'TIME_EXIT',
+      'NEWS_EVENT', 'SYSTEM_EXIT'
+    ),
+    allowNull: true
+  },
+  screenshot: {
+    type: DataTypes.TEXT,  // base64 data URL
     allowNull: true
   }
 }, {

@@ -214,6 +214,46 @@ const STATIC_SYMBOLS = [
   { symbol: 'CARTRADE',       lotSize: 600  },
 ];
 
+// ── GET /api/nse/search?q=... ────────────────────────────────────────────────
+router.get('/search', async (req, res) => {
+  const q = req.query.q;
+  if (!q || q.length < 2) return res.json({ symbols: [] });
+
+  try {
+    // Use Yahoo Finance autocomplete for a broader search (all stocks + indices)
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0&listsCount=0&crumb=123`;
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+
+    const quotes = response.data?.quotes || [];
+    const symbols = quotes
+      .filter(q => q.exchange === 'NSI' || q.exchange === 'BSE' || q.symbol.endsWith('.NS') || q.symbol.endsWith('.BO'))
+      .map(q => {
+        let symbol = q.symbol.replace('.NS', '').replace('.BO', '');
+        // Special handling for Yahoo Finance index symbols
+        if (symbol === '^NSEI') symbol = 'NIFTY';
+        if (symbol === '^NSEBANK') symbol = 'BANKNIFTY';
+        if (symbol === '^BSESN') symbol = 'SENSEX';
+        
+        return {
+          symbol: symbol,
+          name: q.shortname || q.longname || '',
+          exchange: q.exchange === 'BSE' || q.symbol.endsWith('.BO') ? 'BSE' : 'NSE',
+          type: q.quoteType,
+          lotSize: 1 // Default lot size for equity
+        };
+      });
+
+    res.json({ symbols });
+  } catch (err) {
+    console.error('[NSE] Search failed:', err.message);
+    res.status(500).json({ message: 'Search failed' });
+  }
+});
+
 // ── GET /api/nse/fno-symbols ──────────────────────────────────────────────────
 router.get('/fno-symbols', async (req, res) => {
   // Serve from cache if fresh
@@ -376,7 +416,7 @@ router.get('/expiry-dates/:symbol', async (req, res) => {
   }
 
   try {
-    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(symbol);
+    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'].includes(symbol);
     const baseUrl = isIndex 
       ? 'https://www.nseindia.com/api/option-chain-indices' 
       : 'https://www.nseindia.com/api/option-chain-equities';

@@ -116,15 +116,17 @@ router.get('/risk', async (req, res) => {
 // ── PUT /api/profile/risk ─────────────────────────────────────────────────────
 router.put('/risk', async (req, res) => {
   try {
-    const { totalCapital, availableMargin, riskPerTrade, maxDailyLoss } = req.body;
+    const { totalCapital, availableMargin, riskPerTrade, maxDailyLoss, dailyTargetPoints, dailySlPoints } = req.body;
     const user = await User.findByPk(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
     const rm = { ...user.riskManagement };
-    if (totalCapital    != null) rm.totalCapital    = Number(totalCapital);
-    if (availableMargin != null) rm.availableMargin = Number(availableMargin);
-    if (riskPerTrade    != null) rm.riskPerTrade    = Number(riskPerTrade);
-    if (maxDailyLoss    != null) rm.maxDailyLoss    = Number(maxDailyLoss);
+    if (totalCapital      != null) rm.totalCapital      = Number(totalCapital);
+    if (availableMargin   != null) rm.availableMargin   = Number(availableMargin);
+    if (riskPerTrade      != null) rm.riskPerTrade      = Number(riskPerTrade);
+    if (maxDailyLoss      != null) rm.maxDailyLoss      = Number(maxDailyLoss);
+    if (dailyTargetPoints != null) rm.dailyTargetPoints = Number(dailyTargetPoints);
+    if (dailySlPoints     != null) rm.dailySlPoints     = Number(dailySlPoints);
     
     user.riskManagement = rm;
     await user.save();

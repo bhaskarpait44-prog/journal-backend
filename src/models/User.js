@@ -68,7 +68,9 @@ User.init({
       totalCapital: 0,
       availableMargin: 0,
       riskPerTrade: 1,
-      maxDailyLoss: 2
+      maxDailyLoss: 2,
+      dailyTargetPoints: 40,
+      dailySlPoints: 20
     }
   },
   sessions: {

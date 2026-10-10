@@ -916,17 +916,23 @@ router.get('/deep', async (req, res) => {
 
 router.get('/daily-risk-status', async (req, res) => {
   try {
-    const fromDate = new Date();
-    fromDate.setHours(0, 0, 0, 0);
-    const toDate = new Date();
-    toDate.setHours(23, 59, 59, 999);
+    let fromDate = new Date();
+    let toDate = new Date();
+    if (req.query.date) {
+      fromDate = parseDateBoundary(req.query.date, 'start') || new Date();
+      toDate = parseDateBoundary(req.query.date, 'end') || new Date();
+    } else {
+      fromDate.setHours(0, 0, 0, 0);
+      toDate.setHours(23, 59, 59, 999);
+    }
 
     const trades = await Trade.findAll({
       where: {
         userId: req.user.id,
         status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
         exitDate: { [Op.gte]: fromDate, [Op.lte]: toDate }
-      }
+      },
+      order: [['exitDate', 'DESC']]
     });
 
     const todayPnl = trades.reduce((sum, t) => sum + (t.netPnl || 0), 0);
@@ -935,6 +941,8 @@ router.get('/daily-risk-status', async (req, res) => {
     const risk = user.riskManagement || {};
     const totalCapital = Number(risk.totalCapital) || 0;
     const maxDailyLossPct = Number(risk.maxDailyLoss) || 2;
+    const dailyTargetPoints = Number(risk.dailyTargetPoints) || 40;
+    const dailySlPoints = Number(risk.dailySlPoints) || 20;
     
     const maxDailyLossAmount = (totalCapital * maxDailyLossPct) / 100;
     
@@ -949,12 +957,190 @@ router.get('/daily-risk-status', async (req, res) => {
       isWarning = percentUsed >= 80;
     }
 
+    // ── Points Tracking Calculations ──
+    let todayGainedPoints = 0;
+    let todayLostPoints = 0;
+    let todayNetPoints = 0;
+
+    const todayTrades = trades.map(t => {
+      let pts = 0;
+      if (t.entryPrice != null && t.exitPrice != null) {
+        pts = t.tradeType === 'SELL'
+          ? (Number(t.entryPrice) - Number(t.exitPrice))
+          : (Number(t.exitPrice) - Number(t.entryPrice));
+      } else if (t.pnl && t.quantity) {
+        pts = Number(t.pnl) / Number(t.quantity);
+      }
+      pts = Number(pts.toFixed(2));
+
+      if (pts > 0) todayGainedPoints += pts;
+      else if (pts < 0) todayLostPoints += Math.abs(pts);
+      todayNetPoints += pts;
+
+      let plannedTargetPts = 0;
+      let plannedSlPts = 0;
+      if (t.entryPrice != null) {
+        if (t.target != null) plannedTargetPts = Number(Math.abs(Number(t.target) - Number(t.entryPrice)).toFixed(2));
+        if (t.stopLoss != null) plannedSlPts = Number(Math.abs(Number(t.entryPrice) - Number(t.stopLoss)).toFixed(2));
+      }
+
+      return {
+        id: t.id,
+        symbol: t.symbol,
+        underlying: t.underlying,
+        instrumentType: t.instrumentType,
+        tradeType: t.tradeType,
+        optionType: t.optionType,
+        strikePrice: t.strikePrice,
+        quantity: t.quantity,
+        lotSize: t.lotSize,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        stopLoss: t.stopLoss,
+        target: t.target,
+        points: pts,
+        plannedTargetPts,
+        plannedSlPts,
+        netPnl: Number((t.netPnl || 0).toFixed(2)),
+        exitDate: t.exitDate
+      };
+    });
+
+    todayGainedPoints = Number(todayGainedPoints.toFixed(2));
+    todayLostPoints = Number(todayLostPoints.toFixed(2));
+    todayNetPoints = Number(todayNetPoints.toFixed(2));
+
+    const winTrades = todayTrades.filter(t => t.points > 0);
+    const lossTrades = todayTrades.filter(t => t.points < 0);
+    const winTradesCount = winTrades.length;
+    const lossTradesCount = lossTrades.length;
+
+    const pointTargetProgress = dailyTargetPoints > 0
+      ? Number(((todayNetPoints / dailyTargetPoints) * 100).toFixed(1))
+      : 0;
+
+    const pointSlConsumed = dailySlPoints > 0
+      ? Number(((todayLostPoints / dailySlPoints) * 100).toFixed(1))
+      : 0;
+
+    const remainingTargetPoints = dailyTargetPoints > 0
+      ? Number(Math.max(0, dailyTargetPoints - todayNetPoints).toFixed(2))
+      : 0;
+
+    const remainingSlPoints = dailySlPoints > 0
+      ? Number(Math.max(0, dailySlPoints - todayLostPoints).toFixed(2))
+      : 0;
+
+    const isPointSlBreached = dailySlPoints > 0 && todayLostPoints >= dailySlPoints;
+    const isPointSlWarning = dailySlPoints > 0 && (todayLostPoints / dailySlPoints) >= 0.8;
+    const isPointTargetAchieved = dailyTargetPoints > 0 && todayNetPoints >= dailyTargetPoints;
+
+    const plannedPointRR = dailySlPoints > 0
+      ? Number((dailyTargetPoints / dailySlPoints).toFixed(2))
+      : null;
+
+    const avgWinPoints = winTradesCount > 0
+      ? Number((todayGainedPoints / winTradesCount).toFixed(2))
+      : 0;
+    const avgLossPoints = lossTradesCount > 0
+      ? Number((todayLostPoints / lossTradesCount).toFixed(2))
+      : 0;
+
+    const realizedPointRR = avgLossPoints > 0
+      ? Number((avgWinPoints / avgLossPoints).toFixed(2))
+      : (avgWinPoints > 0 ? 999 : null);
+
+    // ── 7-Day Point Consistency History ──
+    const sevenDaysAgo = new Date(fromDate);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+
+    const historyTrades = await Trade.findAll({
+      where: {
+        userId: req.user.id,
+        status: { [Op.in]: ['CLOSED', 'EXPIRED'] },
+        exitDate: { [Op.gte]: sevenDaysAgo, [Op.lte]: toDate }
+      },
+      attributes: ['exitDate', 'entryPrice', 'exitPrice', 'tradeType', 'pnl', 'netPnl', 'quantity'],
+      raw: true
+    });
+
+    const dayMap = {};
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(fromDate);
+      d.setDate(d.getDate() - i);
+      const key = d.toISOString().split('T')[0];
+      dayMap[key] = {
+        date: key,
+        dayLabel: d.toLocaleDateString('en-US', { weekday: 'short' }),
+        netPoints: 0,
+        gainedPoints: 0,
+        lostPoints: 0,
+        netPnl: 0,
+        tradesCount: 0
+      };
+    }
+
+    historyTrades.forEach(t => {
+      if (!t.exitDate) return;
+      const key = new Date(t.exitDate).toISOString().split('T')[0];
+      if (dayMap[key]) {
+        let pts = 0;
+        if (t.entryPrice != null && t.exitPrice != null) {
+          pts = t.tradeType === 'SELL'
+            ? (Number(t.entryPrice) - Number(t.exitPrice))
+            : (Number(t.exitPrice) - Number(t.entryPrice));
+        } else if (t.pnl && t.quantity) {
+          pts = Number(t.pnl) / Number(t.quantity);
+        }
+        pts = Number(pts.toFixed(2));
+
+        dayMap[key].netPoints += pts;
+        if (pts > 0) dayMap[key].gainedPoints += pts;
+        else if (pts < 0) dayMap[key].lostPoints += Math.abs(pts);
+        dayMap[key].netPnl += (t.netPnl || 0);
+        dayMap[key].tradesCount += 1;
+      }
+    });
+
+    const dailyPointsHistory = Object.values(dayMap).map(d => ({
+      ...d,
+      netPoints: Number(d.netPoints.toFixed(2)),
+      gainedPoints: Number(d.gainedPoints.toFixed(2)),
+      lostPoints: Number(d.lostPoints.toFixed(2)),
+      netPnl: Number(d.netPnl.toFixed(2)),
+      targetMet: d.netPoints >= dailyTargetPoints,
+      slHit: dailySlPoints > 0 && d.lostPoints >= dailySlPoints
+    }));
+
     res.json({
-      todayPnl,
-      maxDailyLossAmount,
-      percentUsed,
+      todayPnl: Number(todayPnl.toFixed(2)),
+      maxDailyLossAmount: Number(maxDailyLossAmount.toFixed(2)),
+      percentUsed: Number(percentUsed.toFixed(1)),
       isBreached,
-      isWarning
+      isWarning,
+      // Points Metrics:
+      dailyTargetPoints,
+      dailySlPoints,
+      plannedPointRR,
+      todayNetPoints,
+      todayGainedPoints,
+      todayLostPoints,
+      pointTargetProgress,
+      pointSlConsumed,
+      remainingTargetPoints,
+      remainingSlPoints,
+      isPointSlBreached,
+      isPointSlWarning,
+      isPointTargetAchieved,
+      todayTradeCount: trades.length,
+      winTradesCount,
+      lossTradesCount,
+      avgWinPoints,
+      avgLossPoints,
+      realizedPointRR,
+      todayTrades,
+      dailyPointsHistory
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

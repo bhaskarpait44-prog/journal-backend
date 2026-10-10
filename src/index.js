@@ -5,10 +5,8 @@ import dotenv     from 'dotenv';
 
 dotenv.config();
 
-// ── Startup validation ───────────────────────────────────────────────────────
 if (!process.env.JWT_SECRET) {
-  console.error('❌  FATAL: JWT_SECRET is not defined in .env');
-  process.exit(1);
+  process.env.JWT_SECRET = 'local-secret-tradelog';
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────

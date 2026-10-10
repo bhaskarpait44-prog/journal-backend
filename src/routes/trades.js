@@ -40,6 +40,42 @@ router.get('/tags/popular', async (req, res) => {
   }
 });
 
+router.get('/meta/options', async (req, res) => {
+  try {
+    const trades = await Trade.findAll({
+      where: { userId: req.user.id },
+      attributes: ['strategy', 'setupType'],
+      raw: true
+    });
+
+    const defaultStrategies = [
+      'Long Call', 'Long Put', 'Short Call', 'Short Put',
+      'Bull Call Spread', 'Bear Put Spread', 'Iron Condor',
+      'Straddle', 'Strangle', 'Butterfly', 'Scalp', 'Mean Reversion', 'Breakout'
+    ];
+    const defaultSetups = [
+      'Breakout', 'Mean Reversion', 'Trend Following',
+      'Gap Fill', 'Reversal', 'Support/Resistance',
+      'News Based', 'Post-Earnings', 'Double Bottom', 'Double Top'
+    ];
+
+    const userStrategies = new Set(defaultStrategies);
+    const userSetups = new Set(defaultSetups);
+
+    trades.forEach(t => {
+      if (t.strategy && t.strategy.trim()) userStrategies.add(t.strategy.trim());
+      if (t.setupType && t.setupType.trim()) userSetups.add(t.setupType.trim());
+    });
+
+    res.json({
+      strategies: Array.from(userStrategies),
+      setups: Array.from(userSetups)
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 router.get('/latest', async (req, res) => {
   try {
     const trade = await Trade.findOne({
@@ -137,11 +173,16 @@ router.get('/', async (req, res) => {
     if (symbol)     where.symbol     = { [Op.iLike]: `%${symbol}%` };
     if (underlying) where.underlying = { [Op.iLike]: underlying };
     if (from || to) {
-      where.entryDate = {};
       const fromDate = parseDateBoundary(from, 'start');
       const toDate = parseDateBoundary(to, 'end');
-      if (fromDate) where.entryDate[Op.gte] = fromDate;
-      if (toDate)   where.entryDate[Op.lte] = toDate;
+      const dateCond = {};
+      if (fromDate) dateCond[Op.gte] = fromDate;
+      if (toDate)   dateCond[Op.lte] = toDate;
+
+      where[Op.or] = [
+        { exitDate: dateCond },
+        { entryDate: dateCond }
+      ];
     }
     const total  = await Trade.count({ where });
     const trades = await Trade.findAll({
@@ -311,6 +352,41 @@ router.delete('/:id', async (req, res) => {
   } catch(err){res.status(500).json({message:err.message});}
 });
 
+router.post('/batch-psychology', async (req, res) => {
+  try {
+    const { tradeIds, emotionBefore, emotionAfter, disciplineRating, followedPlan, mistakeTags, notes } = req.body;
+    if (!Array.isArray(tradeIds) || tradeIds.length === 0) {
+      return res.status(400).json({ message: 'No trade IDs provided.' });
+    }
+    const trades = await Trade.findAll({
+      where: {
+        id: { [Op.in]: tradeIds },
+        userId: req.user.id
+      }
+    });
+    for (const trade of trades) {
+      const current = trade.psychology || {};
+      await trade.update({
+        psychology: {
+          emotionBefore: emotionBefore !== undefined ? (emotionBefore || '') : (current.emotionBefore || ''),
+          emotionAfter: emotionAfter !== undefined ? (emotionAfter || '') : (current.emotionAfter || ''),
+          disciplineRating: disciplineRating !== undefined && disciplineRating !== '' && disciplineRating != null 
+            ? Number(disciplineRating) 
+            : current.disciplineRating,
+          followedPlan: followedPlan !== undefined && followedPlan != null 
+            ? Boolean(followedPlan) 
+            : current.followedPlan,
+          mistakeTags: mistakeTags !== undefined 
+            ? (Array.isArray(mistakeTags) ? mistakeTags : []) 
+            : (current.mistakeTags || []),
+          notes: notes !== undefined ? (notes || '') : (current.notes || '')
+        }
+      });
+    }
+    res.json({ message: `Successfully updated psychology on ${trades.length} trades.`, count: trades.length });
+  } catch(err) { res.status(400).json({ message: err.message }); }
+});
+
 router.post('/:id/psychology', async (req, res) => {
   try {
     const {emotionBefore,emotionAfter,disciplineRating,followedPlan,mistakeTags,notes} = req.body;
@@ -366,9 +442,18 @@ router.post('/:id/screenshot', async (req, res) => {
 router.post('/import/csv', upload.single('file'), async (req, res) => {
   try {
     if(!req.file) return res.status(400).json({message:'No file uploaded.'});
-    const {broker,trades:rawTrades,skipped} = parseCSVBuffer(req.file.buffer,req.user.id);
+    const { strategy, setupType, notes, tradeDate, date, entryDate } = req.body;
+    const fallbackDate = tradeDate || date || entryDate || null;
+    const {broker,trades:rawTrades,skipped} = parseCSVBuffer(req.file.buffer, req.user.id, fallbackDate);
     if(!rawTrades.length) return res.status(400).json({message:`No options trades found. Broker: ${broker}.`,broker,skipped:skipped.slice(0,10)});
     const paired = buildPositions(rawTrades,req.user.id,'csv',broker);
+
+    // Apply batch metadata if provided
+    for (const t of paired) {
+      if (strategy && !t.strategy) t.strategy = strategy;
+      if (setupType && !t.setupType) t.setupType = setupType;
+      if (notes && !t.notes) t.notes = notes;
+    }
 
     const brokerIds = paired.filter(t => t.brokerId).map(t => t.brokerId);
     const existing = brokerIds.length > 0

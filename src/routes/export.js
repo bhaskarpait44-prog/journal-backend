@@ -55,7 +55,7 @@ function computeSummary(trades) {
     totalTrades:  closed.length,
     winners:      winners.length,
     losers:       losers.length,
-    winRate:      closed.length ? (winners.length / closed.length) * 100 : 0,
+    winRate:      closed.length ? parseFloat(((winners.length / closed.length) * 100).toFixed(1)) : 0,
     totalPnl:     parseFloat(totalPnl.toFixed(2)),
     grossPnl:     parseFloat(grossPnl.toFixed(2)),
     totalCharges: parseFloat(charges.toFixed(2)),

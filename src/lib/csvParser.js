@@ -1,25 +1,13 @@
 /**
- * csvParser.js — Universal Indian Broker CSV Parser
- * Supports: Zerodha, Upstox, Angel One, Fyers, Groww, 5paisa,
- *           ICICI Direct, HDFC, Sharekhan, Kotak, AliceBlue, Dhan, Generic
+ * csvParser.js — Dedicated Dhan Broker CSV Parser
+ * Supported format: Dhan Position / P&L CSV:
+ * "Name","Product","Qty","Buy Avg Price","Sell Avg Price","LTP","P&L"
  */
 
 import { calcCharges } from './calcCharges.js';
 
 export const BROKER_NAMES = {
-  UPSTOX:    'Upstox',
-  ANGEL:     'Angel One',
-  FYERS:     'Fyers',
-  GROWW:     'Groww',
-  FIVEPAISA: '5paisa',
-  ICICI:     'ICICI Direct',
-  HDFC:      'HDFC Securities',
-  SHAREKHAN: 'Sharekhan',
-  KOTAK:     'Kotak Securities',
-  ALICEBLUE: 'Alice Blue',
-  DHAN:      'Dhan',
-  DHAN_PNL:  'Dhan (P&L)',
-  GENERIC:   'Generic',
+  DHAN: 'Dhan',
 };
 
 const norm = (s) => (s || '').toString().toLowerCase().trim().replace(/[\s\-\.\/]+/g, '_');
@@ -41,20 +29,61 @@ function pick(row, ...keys) {
   return '';
 }
 
+const MONTH_MAP = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+};
+
 function parseDate(raw) {
   if (!raw) return null;
+  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
   const s = raw.toString().trim();
-  if (!s || s === '-' || s === 'N/A') return null;
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return new Date(s);
-  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-  if (m1) return new Date(`${m1[3]}-${m1[2].padStart(2,'0')}-${m1[1].padStart(2,'0')}`);
-  const m2 = s.match(/^(\d{1,2})[\/\-]([A-Za-z]{3})[\/\-](\d{2,4})/);
-  if (m2) { const yr = m2[3].length === 2 ? '20' + m2[3] : m2[3]; return new Date(`${m2[1]} ${m2[2]} ${yr}`); }
-  const m3 = s.match(/^(\d{4})\/(\d{2})\/(\d{2})/);
-  if (m3) return new Date(`${m3[1]}-${m3[2]}-${m3[3]}`);
-  const m4 = s.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
-  if (m4) return new Date(`${m4[1]} ${m4[2]} ${m4[3]}`);
-  return new Date(s);
+  if (!s || s === '-' || s === 'N/A' || s === 'null' || s === 'undefined') return null;
+
+  // 1. ISO or YYYY-MM-DD / YYYY/MM/DD with optional time
+  const isoMatch = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (isoMatch) {
+    const yr = parseInt(isoMatch[1], 10);
+    const mo = parseInt(isoMatch[2], 10) - 1;
+    const da = parseInt(isoMatch[3], 10);
+    const hr = isoMatch[4] ? parseInt(isoMatch[4], 10) : 0;
+    const mi = isoMatch[5] ? parseInt(isoMatch[5], 10) : 0;
+    const se = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
+    const d = new Date(yr, mo, da, hr, mi, se);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // 2. Numeric DMY: DD/MM/YYYY or DD-MM-YYYY with optional time
+  const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (dmyMatch) {
+    const da = parseInt(dmyMatch[1], 10);
+    const mo = parseInt(dmyMatch[2], 10) - 1;
+    const yr = parseInt(dmyMatch[3], 10);
+    const hr = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 0;
+    const mi = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
+    const se = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
+    const d = new Date(yr, mo, da, hr, mi, se);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // 3. DD-Mon-YYYY or DD Mon YYYY or DD/Mon/YYYY with optional time
+  const monMatch = s.match(/^(\d{1,2})[\/\-\s]+([A-Za-z]{3})[\/\-\s]+(\d{2,4})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (monMatch) {
+    const da = parseInt(monMatch[1], 10);
+    const mo = MONTH_MAP[monMatch[2].toLowerCase()];
+    if (mo !== undefined) {
+      let yr = parseInt(monMatch[3], 10);
+      if (yr < 100) yr += 2000;
+      const hr = monMatch[4] ? parseInt(monMatch[4], 10) : 0;
+      const mi = monMatch[5] ? parseInt(monMatch[5], 10) : 0;
+      const se = monMatch[6] ? parseInt(monMatch[6], 10) : 0;
+      const d = new Date(yr, mo, da, hr, mi, se);
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+
+  const fallback = new Date(s);
+  return isNaN(fallback.getTime()) ? null : fallback;
 }
 
 function safeFloat(v) {
@@ -72,14 +101,12 @@ function safeInt(v) {
 function extractOptionType(sym) {
   if (!sym) return 'XX';
   const s = sym.toUpperCase().trim();
-  if (s.endsWith('CE') || s.endsWith(' CE')) return 'CE';
-  if (s.endsWith('PE') || s.endsWith(' PE')) return 'PE';
-  if (s.includes('CALL')) return 'CE';
-  if (s.includes('PUT'))  return 'PE';
+  if (s.endsWith('CE') || s.endsWith(' CE') || s.includes(' CALL') || s.endsWith('CALL')) return 'CE';
+  if (s.endsWith('PE') || s.endsWith(' PE') || s.includes(' PUT') || s.endsWith('PUT')) return 'PE';
   const parts = s.split(/\s+/);
   for (const p of parts) {
-    if (p === 'CE') return 'CE';
-    if (p === 'PE') return 'PE';
+    if (p === 'CE' || p === 'CALL') return 'CE';
+    if (p === 'PE' || p === 'PUT') return 'PE';
   }
   return 'XX';
 }
@@ -89,7 +116,6 @@ function detectInstrumentType(sym) {
   const s = sym.toUpperCase().trim();
   if (s.includes('CE') || s.includes('PE') || s.includes('CALL') || s.includes('PUT')) return 'OPTIONS';
   if (s.includes('FUT')) return 'FUTURES';
-  // Check for common option/future symbol patterns like NIFTY26MAY23750CE
   if (/[A-Z]+\d{2}[A-Z]{3}\d+(CE|PE)/.test(s)) return 'OPTIONS';
   if (/[A-Z]+\d{2}[A-Z]{3}FUT/.test(s)) return 'FUTURES';
   return 'EQUITY';
@@ -109,8 +135,7 @@ function extractUnderlying(sym) {
   const s = sym.toUpperCase().trim();
   const withoutExch = s.replace(/^(NSE|BSE|NFO|MCX|BFO)[:_]/, '');
 
-  // Handle "OPT NIFTY 12 May 2026 23750 PE" format
-  if (withoutExch.startsWith('OPT ')) {
+  if (withoutExch.startsWith('OPT ') || withoutExch.startsWith('FUT ')) {
     const parts = withoutExch.split(/\s+/);
     if (parts.length > 1) return parts[1];
   }
@@ -124,21 +149,29 @@ function extractUnderlying(sym) {
   return withoutExch.replace(/\d+/g, '').replace(/(CE|PE|CALL|PUT)$/i, '').trim();
 }
 
-function normTradeType(v) {
-  const s = (v || '').toString().toUpperCase().trim();
-  if (['B','BUY','PURCHASE','BOUGHT','BUY_ORDER','LONG'].includes(s)) return 'BUY';
-  if (['S','SELL','SOLD','SELL_ORDER','SHORT','SL','SQUARE OFF','SQUAREOFF'].includes(s)) return 'SELL';
-  if (s.startsWith('B')) return 'BUY';
-  if (s.startsWith('S')) return 'SELL';
-  return 'BUY';
-}
-
 function inferExpiryFromSymbol(sym) {
   if (!sym) return null;
   const MONTHS = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
+  
+  const m0 = sym.match(/\b(\d{1,2})\s+([A-Za-z]{3})\s+(\d{2,4})\b/i);
+  if (m0) {
+    const yr = m0[3].length === 2 ? 2000 + parseInt(m0[3], 10) : parseInt(m0[3], 10);
+    const mo = MONTHS[m0[2].toUpperCase()];
+    if (mo !== undefined) return new Date(yr, mo, parseInt(m0[1], 10));
+  }
+
+  const m0NoYear = sym.match(/\b(\d{1,2})\s+([A-Za-z]{3})\b/i);
+  if (m0NoYear) {
+    const mo = MONTHS[m0NoYear[2].toUpperCase()];
+    if (mo !== undefined) {
+      const yr = new Date().getFullYear();
+      return new Date(yr, mo, parseInt(m0NoYear[1], 10));
+    }
+  }
+
   const m1 = sym.toUpperCase().match(/([A-Z]+)(\d{2})([A-Z]{3})(\d+)(CE|PE)/);
   if (m1) {
-    const year = 2000 + parseInt(m1[2]);
+    const year = 2000 + parseInt(m1[2], 10);
     const month = MONTHS[m1[3]];
     if (month !== undefined) {
       const d = new Date(year, month + 1, 0);
@@ -146,221 +179,99 @@ function inferExpiryFromSymbol(sym) {
       return d;
     }
   }
-  const m2 = sym.toUpperCase().match(/([A-Z]+)(\d{2})(\d)(\d{2})(\d+)(CE|PE)/);
-  if (m2) {
-    const year = 2000 + parseInt(m2[2]);
-    const month = parseInt(m2[3]) - 1;
-    const day = parseInt(m2[4]);
-    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) return new Date(year, month, day);
-  }
-  const m3 = sym.match(/(\d{1,2})\s+([A-Z]{3})\s+(\d{2,4})/i);
-  if (m3) { const yr = m3[3].length === 2 ? '20' + m3[3] : m3[3]; return new Date(`${m3[1]} ${m3[2]} ${yr}`); }
   return null;
 }
 
-function detectBroker(headers) {
-  const h = headers.map(norm);
-  const any = (...keys) => keys.some(k => h.some(x => x.includes(norm(k))));
-
-  if (any('tradingsymbol') && any('trade_date','order_execution_time') && any('trade_type')) return BROKER_NAMES.ZERODHA;
-  if ((any('security_name') || any('scrip_name')) && (any('buy_avg','avg_buy_price','buy_average') || any('realized_profit','realised_profit', 'realised_p_l'))) return BROKER_NAMES.DHAN_PNL;
-  if (any('exchange_segment') && any('tradingsymbol') && any('transaction_type')) return BROKER_NAMES.DHAN;
-  if (any('security_id') && any('transaction_type') && any('quantity')) return BROKER_NAMES.DHAN;
-  if (any('instrument_name','scrip_name') && any('transaction_type') && any('trade_date','trade_time')) return BROKER_NAMES.UPSTOX;
-  if (any('trade_price','tradeprice') && any('side','direction') && any('trade_date')) return BROKER_NAMES.FYERS;
-  if (any('name') && any('buy/sell','buy_sell') && any('segment') && any('trade price','trade_price','trade_value','trade value')) return BROKER_NAMES.GROWW;
-  if (any('instrument_type') && any('order_execution_date','trade_execution_time')) return BROKER_NAMES.GROWW;
-  if (any('symbol_name','scripname') && any('buy_sell','buysell')) return BROKER_NAMES.ANGEL;
-  if (any('trade_no','contract_note') && any('traded_qty')) return BROKER_NAMES.HDFC;
-  if (any('buy_sell_indicator') && any('order_no')) return BROKER_NAMES.KOTAK;
-  if (any('scripname','scrip_name') && any('tradedate') && any('rate')) return BROKER_NAMES.SHAREKHAN;
-  if (any('scripcode','scrip_code') && any('rate','traded_price')) return BROKER_NAMES.FIVEPAISA;
-  if (any('buy_avg','sell_avg') || (any('scrip_name') && any('buy_qty','sell_qty'))) return BROKER_NAMES.ICICI;
-  if (any('avg_prc','avg_price') && any('qty') && any('side')) return BROKER_NAMES.ALICEBLUE;
-  return BROKER_NAMES.GENERIC;
-}
-
-function normalizeZerodha(row) {
-  const sym = pick(row, 'tradingsymbol', 'symbol');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'trade_type')),
-    quantity: safeInt(pick(row, 'quantity')), entryPrice: safeFloat(pick(row, 'price', 'average_price')),
-    entryDate: parseDate(pick(row, 'trade_date', 'order_execution_time')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'fees')) };
-}
-
-function normalizeUpstox(row) {
-  const sym = pick(row, 'instrument_name', 'scrip_name', 'symbol', 'trading_symbol', 'tradingsymbol');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'transaction_type', 'buy_sell', 'trade_type')),
-    quantity: safeInt(pick(row, 'quantity', 'qty', 'traded_qty')),
-    entryPrice: safeFloat(pick(row, 'average_price', 'price', 'trade_price', 'avg_price', 'traded_price')),
-    entryDate: parseDate(pick(row, 'trade_date', 'order_time', 'trade_time', 'execution_time')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'fees')) };
-}
-
-function normalizeAngel(row) {
-  const sym = pick(row, 'symbol_name', 'scripname', 'symbol', 'scrip_name', 'trading_symbol');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy_sell', 'buysell', 'trade_type', 'transaction_type')),
-    quantity: safeInt(pick(row, 'net_qty', 'quantity', 'qty', 'traded_qty')),
-    entryPrice: safeFloat(pick(row, 'avg_cost', 'average_price', 'price', 'rate', 'traded_rate')),
-    entryDate: parseDate(pick(row, 'trade_date', 'date', 'order_date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges')) };
-}
-
-function normalizeFyers(row) {
-  const rawSym = pick(row, 'symbol', 'scrip', 'tradingsymbol', 'trading_symbol');
-  const sym = rawSym.includes(':') ? rawSym.split(':')[1] : rawSym;
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'side', 'direction', 'buy_sell', 'type', 'trade_type')),
-    quantity: safeInt(pick(row, 'qty', 'quantity', 'traded_qty')),
-    entryPrice: safeFloat(pick(row, 'trade_price', 'price', 'avg_price', 'traded_price', 'average_price')),
-    entryDate: parseDate(pick(row, 'trade_date', 'orderdate', 'date', 'order_date_time')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'taxes')) };
-}
-
-function normalizeGroww(row) {
-  const sym = pick(row, 'name', 'instrument_name', 'symbol', 'trading_symbol', 'scrip', 'tradingsymbol');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy/sell', 'buy_sell', 'trade_type', 'transaction_type', 'side')),
-    quantity: safeInt(pick(row, 'quantity/lot', 'quantity', 'qty', 'lot', 'traded_quantity')),
-    entryPrice: safeFloat(pick(row, 'trade price', 'trade_price', 'price', 'average_price', 'avg_price', 'execution_price')),
-    entryDate: parseDate(pick(row, 'date', 'order_execution_date', 'trade_date', 'trade_execution_time', 'order_date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'total_charges')) };
-}
-
-function normalize5paisa(row) {
-  const sym = pick(row, 'scrip_name', 'scripname', 'symbol', 'scrip', 'trading_symbol', 'instrument_name');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy_sell', 'buysell', 'transaction_type', 'side')),
-    quantity: safeInt(pick(row, 'qty', 'quantity', 'traded_qty', 'net_qty')),
-    entryPrice: safeFloat(pick(row, 'rate', 'traded_price', 'price', 'avg_price', 'average_price')),
-    entryDate: parseDate(pick(row, 'trade_date', 'order_date', 'date', 'execution_date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges')) };
-}
-
-function normalizeICICI(row) {
-  const sym = pick(row, 'scrip_name', 'symbol', 'description', 'contract_description', 'instrument');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy_sell', 'action', 'transaction_type', 'side')),
-    quantity: safeInt(pick(row, 'quantity', 'qty', 'buy_qty', 'sell_qty', 'traded_qty')),
-    entryPrice: safeFloat(pick(row, 'average_price', 'price', 'buy_avg', 'sell_avg', 'rate', 'traded_price')),
-    entryDate: parseDate(pick(row, 'trade_date', 'date', 'order_date', 'settlement_date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'total_charges')) };
-}
-
-function normalizeHDFC(row) {
-  const sym = pick(row, 'scrip_name', 'symbol', 'description', 'contract_note', 'instrument');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy_sell', 'transaction_type', 'side', 'action')),
-    quantity: safeInt(pick(row, 'traded_qty', 'quantity', 'qty', 'executed_qty')),
-    entryPrice: safeFloat(pick(row, 'traded_price', 'price', 'average_price', 'rate')),
-    entryDate: parseDate(pick(row, 'trade_date', 'date', 'execution_date', 'order_date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'total_charges', 'net_amount')) };
-}
-
-function normalizeSharekhan(row) {
-  const sym = pick(row, 'scripname', 'scrip_name', 'symbol', 'contract');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy_sell', 'buysell', 'side', 'transaction')),
-    quantity: safeInt(pick(row, 'quantity', 'qty', 'traded_qty')),
-    entryPrice: safeFloat(pick(row, 'rate', 'price', 'average_price', 'traded_rate')),
-    entryDate: parseDate(pick(row, 'tradedate', 'trade_date', 'date', 'transaction_date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'service_tax', 'total_charges')) };
-}
-
-function normalizeKotak(row) {
-  const sym = pick(row, 'scrip_name', 'symbol', 'instrument', 'contract');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'buy_sell_indicator', 'buy_sell', 'side', 'transaction_type')),
-    quantity: safeInt(pick(row, 'quantity', 'qty', 'traded_qty', 'total_qty')),
-    entryPrice: safeFloat(pick(row, 'price', 'average_price', 'rate', 'traded_price')),
-    entryDate: parseDate(pick(row, 'trade_date', 'order_date', 'date')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges')) };
-}
-
-function normalizeAliceBlue(row) {
-  const sym = pick(row, 'symbol', 'scrip', 'trading_symbol', 'tradingsymbol');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'side', 'buy_sell', 'transaction_type', 'trade_type')),
-    quantity: safeInt(pick(row, 'qty', 'quantity', 'filled_qty')),
-    entryPrice: safeFloat(pick(row, 'avg_prc', 'avg_price', 'price', 'average_price', 'traded_price')),
-    entryDate: parseDate(pick(row, 'time', 'trade_date', 'date', 'order_date', 'fill_time')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges')) };
-}
-
-function normalizeDhan(row) {
-  const sym = pick(row, 'tradingsymbol', 'symbol', 'instrument_name', 'custom_symbol');
-  return { symbol: sym, tradeType: normTradeType(pick(row, 'transaction_type', 'buy_sell', 'side')),
-    quantity: safeInt(pick(row, 'quantity', 'qty', 'filled_qty', 'traded_quantity')),
-    entryPrice: safeFloat(pick(row, 'price', 'avg_price', 'average_price', 'traded_price', 'fill_price')),
-    entryDate: parseDate(pick(row, 'exchange_time', 'trade_date', 'create_time', 'order_date', 'dma_trade_time')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage', 'charges', 'fees')) };
-}
-
-function normalizeDhanPnl(row) {
-  const sym     = pick(row, 'security_name', 'scrip_name', 'symbol', 'tradingsymbol', 'instrument');
-  if (!sym || sym.toLowerCase().includes('net p&l')) return { symbol: null };
-
-  const buyQty  = safeInt(pick(row, 'buy_qty', 'buy_quantity'));
-  const sellQty = safeInt(pick(row, 'sell_qty', 'sell_quantity'));
-  const qty     = buyQty || sellQty || safeInt(pick(row, 'quantity'));
-
-  const buyAvg  = safeFloat(pick(row, 'buy_avg', 'avg_buy_price', 'buy_average', 'buy_price'));
-  const sellAvg = safeFloat(pick(row, 'sell_avg', 'avg_sell_price', 'sell_average', 'sell_price'));
-
-  const pnl     = safeFloat(pick(row, 'realized_profit', 'realised_profit', 'realised_p_l', 'net_profit', 'profit_loss'));
-
-  let date      = parseDate(pick(row, 'trade_date', 'date', 'settlement_date', 'close_date', 'order_date'));
-  if (!date || isNaN(date.getTime())) {
-    date = inferExpiryFromSymbol(sym) || new Date();
+function normalizeDhanRow(row, fallbackDate = null) {
+  const sym = pick(row, 'name', 'security_name', 'scrip_name', 'symbol', 'tradingsymbol', 'custom_symbol', 'instrument_name');
+  if (!sym || sym.toLowerCase().includes('net p&l') || sym.toLowerCase().includes('total')) {
+    return { symbol: null };
   }
 
-  const tradeType  = buyAvg > 0 ? 'BUY' : 'SELL';
-  const entryPrice = buyAvg || sellAvg;
-  const exitPrice  = sellAvg || buyAvg;
+  const qty = safeInt(pick(row, 'qty', 'quantity', 'buy_qty', 'sell_qty', 'traded_quantity', 'filled_qty'));
+  const buyAvg = safeFloat(pick(row, 'buy_avg_price', 'buy_avg', 'avg_buy_price', 'buy_average', 'buy_price', 'price'));
+  const sellAvg = safeFloat(pick(row, 'sell_avg_price', 'sell_avg', 'avg_sell_price', 'sell_average', 'sell_price'));
+  const pnlVal = pick(row, 'p&l', 'p_l', 'realized_profit', 'realised_profit', 'realised_p_l', 'net_profit', 'profit_loss');
+  const pnl = pnlVal !== '' ? safeFloat(pnlVal) : null;
+  const product = pick(row, 'product', 'product_type');
 
-  return { symbol: sym, tradeType, quantity: qty, entryPrice, exitPrice,
-    entryDate: date, exitDate: date, status: 'CLOSED', pnl, netPnl: pnl,
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'charges', 'brokerage', 'taxes', 'total_charges')) };
-}
-
-function normalizeGeneric(row) {
-  const sym = pick(row,
-    'symbol','tradingsymbol','trading_symbol','scrip','scrip_name','symbol_name',
-    'name','instrument','instrument_name','contract','description','product'
+  // Trade execution date lookup - NEVER use contract expiry date for trade execution date!
+  const entryDateRaw = pick(
+    row,
+    'date',
+    'trade_date',
+    'traded_date',
+    'trade_date_time',
+    'traded_at',
+    'entry_date',
+    'buy_date',
+    'order_date',
+    'order_execution_time',
+    'execution_date',
+    'execution_time',
+    'exchange_time',
+    'exchange_timestamp',
+    'create_time',
+    'created_at',
+    'transaction_date',
+    'txn_date',
+    'settlement_date'
   );
-  return { symbol: sym,
-    tradeType: normTradeType(pick(row, 'trade_type','transaction_type','buy_sell','buysell','buy/sell','side','direction','action','type','b_s')),
-    quantity: safeInt(pick(row, 'quantity','qty','quantity/lot','net_qty','traded_qty','filled_qty','executed_qty','lots','no_of_lots')),
-    entryPrice: safeFloat(pick(row, 'price','average_price','avg_price','rate','traded_price','trade_price','trade price','execution_price','avg_prc','fill_price','net_rate')),
-    entryDate: parseDate(pick(row, 'trade_date','date','order_date','execution_date','transaction_date','order_execution_time','trade_time','fill_time','order_time')),
-    underlying: extractUnderlying(sym), optionType: extractOptionType(sym), strikePrice: extractStrike(sym),
-    lotSize: 1, charges: safeFloat(pick(row, 'brokerage','charges','fees','total_charges','net_amount')) };
+
+  const exitDateRaw = pick(
+    row,
+    'exit_date',
+    'sell_date',
+    'exit_time',
+    'square_off_date',
+    'close_date'
+  );
+
+  let date = parseDate(entryDateRaw);
+  if (!date || isNaN(date.getTime())) {
+    if (fallbackDate) {
+      const fb = parseDate(fallbackDate);
+      date = (fb && !isNaN(fb.getTime())) ? fb : new Date();
+    } else {
+      date = new Date();
+    }
+  }
+
+  const isClosed = buyAvg > 0 && sellAvg > 0;
+  let exitDate = parseDate(exitDateRaw);
+  if (!exitDate || isNaN(exitDate.getTime())) {
+    exitDate = isClosed ? date : null;
+  }
+
+  const tradeType = (buyAvg > 0 || sellAvg === 0) ? 'BUY' : 'SELL';
+  const entryPrice = tradeType === 'BUY' ? buyAvg : sellAvg;
+  const exitPrice = isClosed ? sellAvg : null;
+  const status = isClosed ? 'CLOSED' : 'OPEN';
+
+  const calcPnl = pnl !== null ? pnl : (isClosed ? (exitPrice - entryPrice) * (qty || 1) : 0);
+
+  return {
+    symbol: sym,
+    product,
+    tradeType,
+    quantity: qty || 1,
+    entryPrice,
+    exitPrice,
+    entryDate: date,
+    exitDate,
+    status,
+    pnl: calcPnl,
+    netPnl: calcPnl,
+    underlying: extractUnderlying(sym),
+    optionType: extractOptionType(sym),
+    strikePrice: extractStrike(sym),
+    expiryDate: inferExpiryFromSymbol(sym),
+    lotSize: 1,
+    charges: safeFloat(pick(row, 'charges', 'brokerage', 'taxes', 'total_charges'))
+  };
 }
 
-const NORMALIZERS = {
-  [BROKER_NAMES.ZERODHA]:   normalizeZerodha,
-  [BROKER_NAMES.UPSTOX]:    normalizeUpstox,
-  [BROKER_NAMES.ANGEL]:     normalizeAngel,
-  [BROKER_NAMES.FYERS]:     normalizeFyers,
-  [BROKER_NAMES.GROWW]:     normalizeGroww,
-  [BROKER_NAMES.FIVEPAISA]: normalize5paisa,
-  [BROKER_NAMES.ICICI]:     normalizeICICI,
-  [BROKER_NAMES.HDFC]:      normalizeHDFC,
-  [BROKER_NAMES.SHAREKHAN]: normalizeSharekhan,
-  [BROKER_NAMES.KOTAK]:     normalizeKotak,
-  [BROKER_NAMES.ALICEBLUE]: normalizeAliceBlue,
-  [BROKER_NAMES.DHAN]:      normalizeDhan,
-  [BROKER_NAMES.DHAN_PNL]:  normalizeDhanPnl,
-  [BROKER_NAMES.GENERIC]:   normalizeGeneric,
-};
-
-export function parseCSVBuffer(buffer, userId) {
-
+export function parseCSVBuffer(buffer, userId, fallbackDate = null) {
   function parseCSVText(text) {
     const rows = [];
     let row = [], field = '', inQuotes = false;
@@ -394,16 +305,15 @@ export function parseCSVBuffer(buffer, userId) {
   if (!lines.length) throw new Error('CSV file is empty');
 
   const FIELD_KEYWORDS = [
-    'symbol','tradingsymbol','scrip','instrument','qty','quantity','name',
-    'price','rate','date','buy','sell','trade','side','type','segment',
-    'isin','security','transaction','profit','loss','realized'
+    'name', 'product', 'qty', 'quantity', 'buy avg price', 'buy_avg_price', 
+    'sell avg price', 'sell_avg_price', 'ltp', 'p&l', 'p_l', 'tradingsymbol', 'symbol'
   ];
   let headerIdx = 0, bestHits = 0;
   for (let i = 0; i < Math.min(lines.length, 15); i++) {
     const lower = lines[i].toLowerCase();
     const hits = FIELD_KEYWORDS.filter(f => lower.includes(f)).length;
     if (hits > bestHits) { bestHits = hits; headerIdx = i; }
-    if (hits >= 3) break;
+    if (hits >= 2) break;
   }
 
   const allRows = parseCSVText(lines.slice(headerIdx).join('\n'));
@@ -421,16 +331,14 @@ export function parseCSVBuffer(buffer, userId) {
 
   if (records.length === 0) throw new Error('No data rows found in CSV');
 
-  const broker    = detectBroker(rawHeaders);
-  const normalize = NORMALIZERS[broker] || normalizeGeneric;
-  const trades    = [];
-  const skipped   = [];
+  const trades  = [];
+  const skipped = [];
 
   for (let i = 0; i < records.length; i++) {
     try {
-      const t = normalize(records[i]);
+      const t = normalizeDhanRow(records[i], fallbackDate);
 
-      if (!t.symbol) { skipped.push({ row: i+2, reason: 'Missing symbol' }); continue; }
+      if (!t.symbol) { skipped.push({ row: i+2, reason: 'Missing symbol or summary row' }); continue; }
       if (!t.entryDate || isNaN(new Date(t.entryDate))) { skipped.push({ row: i+2, reason: 'Invalid date', symbol: t.symbol }); continue; }
       if (!t.entryPrice || t.entryPrice === 0) { skipped.push({ row: i+2, reason: 'Zero price', symbol: t.symbol }); continue; }
 
@@ -444,7 +352,6 @@ export function parseCSVBuffer(buffer, userId) {
       const entryPrice = t.entryPrice;
       const exitPrice  = t.exitPrice && t.exitPrice > 0 ? t.exitPrice : null;
 
-      // Always auto-calculate Zerodha charges — ignore any CSV charge columns
       const status = t.status || (exitPrice ? 'CLOSED' : 'OPEN');
       const charges = calcCharges(
         entryPrice, 
@@ -460,7 +367,7 @@ export function parseCSVBuffer(buffer, userId) {
       const tradeDoc = {
         userId,
         source:      'csv',
-        broker,
+        broker:      BROKER_NAMES.DHAN,
         exchange,
         symbol:      t.symbol,
         underlying:  (t.underlying || extractUnderlying(t.symbol) || t.symbol).toUpperCase(),
@@ -482,7 +389,7 @@ export function parseCSVBuffer(buffer, userId) {
         tradeDoc.exitDate  = t.exitDate || t.entryDate;
         tradeDoc.status    = 'CLOSED';
         tradeDoc.pnl       = t.pnl    || 0;
-        tradeDoc.netPnl    = t.netPnl || (t.pnl || 0) - charges;
+        tradeDoc.netPnl    = (t.pnl || 0) - charges;
       }
 
       trades.push(tradeDoc);
@@ -491,5 +398,5 @@ export function parseCSVBuffer(buffer, userId) {
     }
   }
 
-  return { broker, trades, skipped };
+  return { broker: BROKER_NAMES.DHAN, trades, skipped };
 }

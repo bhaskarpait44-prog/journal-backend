@@ -22,6 +22,11 @@ import candleRoutes       from './routes/candles.js';
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
+const clientUrls = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map((u) => u.trim())
+  .filter(Boolean);
+
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -29,12 +34,17 @@ const ALLOWED_ORIGINS = [
   'http://127.0.0.1:4173',
   'https://tradelog-journal.vercel.app',
   'https://trade-log.io',
-  process.env.CLIENT_URL
+  ...clientUrls
 ].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    if (
+      !origin || 
+      ALLOWED_ORIGINS.includes(origin) || 
+      origin.endsWith('.vercel.app') || 
+      process.env.NODE_ENV !== 'production'
+    ) {
       callback(null, true);
     } else {
       console.error('CORS Error: Origin not allowed:', origin);

@@ -541,6 +541,55 @@ router.get('/psychology', async (req, res) => {
     const revengeTradeLoss = parseFloat(revengeTrades.reduce((s,t) => s + (Number(t.netPnl) || 0), 0).toFixed(2));
     const fomoTrades = loggedTrades.filter(t => (t.psychology?.mistakeTags || []).includes('fomo_entry'));
     const overtradingCount = loggedTrades.filter(t => (t.psychology?.mistakeTags || []).includes('overtrading'));
+    const failedToTrailTrades = loggedTrades.filter(t => 
+      t.psychology?.trailingSl === 'failed_to_trail' || 
+      (t.psychology?.mistakeTags || []).includes('failed_to_trail_sl')
+    );
+    const failedToTrailLoss = parseFloat(failedToTrailTrades.reduce((s,t) => s + (Number(t.netPnl) < 0 ? Math.abs(Number(t.netPnl)) : 0), 0).toFixed(2));
+
+    // ── Trailing SL Psychological Analysis ──
+    const trailingSlMap = {
+      trailed_disciplined: { status: 'trailed_disciplined', label: 'Trailed per Plan', emoji: '🛡️', count: 0, wins: 0, pnl: 0 },
+      trailed_to_cost:     { status: 'trailed_to_cost',     label: 'Trailed to Cost / BE', emoji: '🔒', count: 0, wins: 0, pnl: 0 },
+      failed_to_trail:     { status: 'failed_to_trail',     label: 'Failed to Trail SL', emoji: '❌', count: 0, wins: 0, pnl: 0, totalLoss: 0 },
+      trailed_too_tight:   { status: 'trailed_too_tight',   label: 'Trailed Too Tight', emoji: '⚠️', count: 0, wins: 0, pnl: 0 },
+      not_applicable:      { status: 'not_applicable',      label: 'Fixed Target/SL', emoji: '🎯', count: 0, wins: 0, pnl: 0 }
+    };
+
+    let trailedProfitLocked = 0;
+
+    loggedTrades.forEach(t => {
+      let tsl = t.psychology?.trailingSl;
+      const mistakes = Array.isArray(t.psychology?.mistakeTags) ? t.psychology.mistakeTags : [];
+      const pnl = Number(t.netPnl) || 0;
+
+      // Inferred if not explicitly selected but tag / exit reason is present
+      if (!tsl) {
+        if (mistakes.includes('failed_to_trail_sl')) tsl = 'failed_to_trail';
+        else if (mistakes.includes('trailed_too_tight')) tsl = 'trailed_too_tight';
+        else if (t.exitReason === 'TRAILING_STOP') tsl = 'trailed_disciplined';
+      }
+
+      if (tsl && trailingSlMap[tsl]) {
+        trailingSlMap[tsl].count++;
+        trailingSlMap[tsl].pnl += pnl;
+        if (pnl > 0) trailingSlMap[tsl].wins++;
+        if (tsl === 'failed_to_trail' && pnl < 0) {
+          trailingSlMap[tsl].totalLoss += Math.abs(pnl);
+        }
+        if ((tsl === 'trailed_disciplined' || tsl === 'trailed_to_cost') && pnl > 0) {
+          trailedProfitLocked += pnl;
+        }
+      }
+    });
+
+    const trailingSlStats = Object.values(trailingSlMap).map(item => ({
+      ...item,
+      winRate: item.count ? parseFloat(((item.wins / item.count) * 100).toFixed(1)) : 0,
+      totalPnl: parseFloat(item.pnl.toFixed(2)),
+      avgPnl: item.count ? parseFloat((item.pnl / item.count).toFixed(2)) : 0,
+      totalLoss: parseFloat((item.totalLoss || 0).toFixed(2))
+    }));
 
     const emoMap = {};
     loggedTrades.forEach(t => {
@@ -598,6 +647,10 @@ router.get('/psychology', async (req, res) => {
       revengeTradeLoss,
       fomoTrades: fomoTrades.length,
       overtradingCount: overtradingCount.length,
+      failedToTrailCount: failedToTrailTrades.length,
+      failedToTrailLoss,
+      trailedProfitLocked: parseFloat(trailedProfitLocked.toFixed(2)),
+      trailingSlStats,
       mostCommonMistake: mistakeFrequency.length ? mistakeFrequency[0].tag : null,
       emotionWinRate,
       mistakeFrequency,
@@ -630,6 +683,7 @@ router.get('/psychology-trends', async (req, res) => {
     const trades = allTrades.filter(t => t.psychology && (
       (t.psychology.emotionBefore && t.psychology.emotionBefore.trim() !== '') ||
       (t.psychology.disciplineRating != null && !isNaN(Number(t.psychology.disciplineRating))) ||
+      (t.psychology.trailingSl && t.psychology.trailingSl.trim() !== '') ||
       (Array.isArray(t.psychology.mistakeTags) && t.psychology.mistakeTags.length > 0)
     ));
 
@@ -644,7 +698,7 @@ router.get('/psychology-trends', async (req, res) => {
     }
 
     const buckets = {};
-    const MISTAKES = ['fomo_entry', 'revenge_trade', 'overtrading', 'no_stoploss', 'oversized_position', 'early_exit', 'late_entry'];
+    const MISTAKES = ['fomo_entry', 'revenge_trade', 'overtrading', 'no_stoploss', 'oversized_position', 'early_exit', 'late_entry', 'failed_to_trail_sl', 'trailed_too_tight'];
     const EMOTIONS  = ['calm', 'confident', 'fearful', 'frustrated', 'overconfident', 'revenge'];
 
     trades.forEach(t => {

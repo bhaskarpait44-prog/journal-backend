@@ -147,6 +147,7 @@ Trade.init({
       emotionAfter: '',
       disciplineRating: null,
       followedPlan: null,
+      trailingSl: null,
       mistakeTags: [],
       notes: ''
     }

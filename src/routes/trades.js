@@ -354,7 +354,7 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/batch-psychology', async (req, res) => {
   try {
-    const { tradeIds, emotionBefore, emotionAfter, disciplineRating, followedPlan, mistakeTags, notes } = req.body;
+    const { tradeIds, emotionBefore, emotionAfter, disciplineRating, followedPlan, mistakeTags, notes, trailingSl } = req.body;
     if (!Array.isArray(tradeIds) || tradeIds.length === 0) {
       return res.status(400).json({ message: 'No trade IDs provided.' });
     }
@@ -376,6 +376,7 @@ router.post('/batch-psychology', async (req, res) => {
           followedPlan: followedPlan !== undefined && followedPlan != null 
             ? Boolean(followedPlan) 
             : current.followedPlan,
+          trailingSl: trailingSl !== undefined ? (trailingSl || null) : (current.trailingSl || null),
           mistakeTags: mistakeTags !== undefined 
             ? (Array.isArray(mistakeTags) ? mistakeTags : []) 
             : (current.mistakeTags || []),
@@ -389,18 +390,20 @@ router.post('/batch-psychology', async (req, res) => {
 
 router.post('/:id/psychology', async (req, res) => {
   try {
-    const {emotionBefore,emotionAfter,disciplineRating,followedPlan,mistakeTags,notes} = req.body;
+    const { emotionBefore, emotionAfter, disciplineRating, followedPlan, mistakeTags, notes, trailingSl } = req.body;
     const trade = await Trade.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if(!trade) return res.status(404).json({message:'Trade not found.'});
     
+    const current = trade.psychology || {};
     await trade.update({
       psychology: {
-        emotionBefore: emotionBefore || '',
-        emotionAfter: emotionAfter || '',
-        disciplineRating: disciplineRating ? Number(disciplineRating) : undefined,
-        followedPlan: followedPlan != null ? Boolean(followedPlan) : undefined,
-        mistakeTags: Array.isArray(mistakeTags) ? mistakeTags : [],
-        notes: notes || ''
+        emotionBefore: emotionBefore !== undefined ? (emotionBefore || '') : (current.emotionBefore || ''),
+        emotionAfter: emotionAfter !== undefined ? (emotionAfter || '') : (current.emotionAfter || ''),
+        disciplineRating: disciplineRating ? Number(disciplineRating) : current.disciplineRating,
+        followedPlan: followedPlan != null ? Boolean(followedPlan) : current.followedPlan,
+        trailingSl: trailingSl !== undefined ? (trailingSl || null) : (current.trailingSl || null),
+        mistakeTags: Array.isArray(mistakeTags) ? mistakeTags : (current.mistakeTags || []),
+        notes: notes !== undefined ? (notes || '') : (current.notes || '')
       }
     });
     
